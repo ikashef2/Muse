@@ -32,7 +32,7 @@ jobs:
           gradle-version: "8.9"
 
       - name: Install pinned Android native toolchain
-        run: sdkmanager "ndk;27.2.12479018" "cmake;3.22.1"
+        run: "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018" "cmake;3.22.1"
 
       - name: Run tests and build APK
         env:
