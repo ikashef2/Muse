@@ -4,7 +4,7 @@
 
 Archive is a local-first Android music curator for a deliberately clean personal library. The player is secondary: new audio is quarantined, inspected, and manually approved before it appears in the verified library.
 
-## Prototype 0.2
+## Prototype 0.3
 
 - Scans Android `MediaStore.Audio` without copying or uploading audio.
 - Reads embedded metadata and technical properties.
@@ -13,10 +13,14 @@ Archive is a local-first Android music curator for a deliberately clean personal
 - Supports canonical metadata drafts, manual verification, and trash suggestions.
 - Detects device-library changes without replacing user edits when the source file is unchanged.
 - Schedules a conservative background rescan after the first authorized scan.
+- Plays local audio through a Media3 background session with system controls.
+- Generates Focus, Energy, Calm, Night, and Discovery mixes locally.
+- Searches MusicBrainz for metadata candidates and ranks them against track duration.
+- Applies accepted matches to the canonical archive only after explicit approval.
 
 ## Safety boundary
 
-This build never rewrites or deletes an audio file. Metadata edits are canonical records in Room. Physical tag writing and Android's recoverable Trash flow belong to the next milestone, after format-by-format atomic-write tests are in place.
+This build never rewrites or deletes an audio file. Metadata edits—including accepted MusicBrainz matches—are canonical records in Room. Physical tag writing and Android's recoverable Trash flow belong to a later milestone, after format-by-format atomic-write tests are in place.
 
 ## Recommended: build in GitHub Actions
 

@@ -17,6 +17,7 @@ class MusicRepository(
     private val context: Context,
     private val dao: TrackDao,
     private val evaluator: MetadataQualityEvaluator,
+    private val musicBrainz: MusicBrainzClient,
 ) {
     fun observeTracks(): Flow<List<TrackEntity>> = dao.observeAll()
 
@@ -184,6 +185,20 @@ class MusicRepository(
 
     suspend fun verify(uri: String) = dao.verify(uri, System.currentTimeMillis())
     suspend fun suggestTrash(uri: String) = dao.suggestTrash(uri)
+    suspend fun searchMetadata(track: TrackEntity): List<MetadataCandidate> = musicBrainz.search(track)
+
+    suspend fun applyMetadataCandidate(track: TrackEntity, candidate: MetadataCandidate) {
+        edit(
+            track.copy(
+                title = candidate.title,
+                artist = candidate.artist.ifBlank { track.artist },
+                albumArtist = candidate.albumArtist.ifBlank { candidate.artist.ifBlank { track.albumArtist } },
+                album = candidate.album.ifBlank { track.album },
+                genre = candidate.genre.ifBlank { track.genre },
+                year = candidate.year ?: track.year,
+            )
+        )
+    }
 
     private fun markExactDuplicates(tracks: List<TrackEntity>): List<TrackEntity> {
         val duplicateUris = tracks
