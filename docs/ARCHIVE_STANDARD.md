@@ -1,6 +1,14 @@
-# Archive Standard v0.1
+# Archive Standard v0.3
 
 This document is the contract between the scanner, the review UI, and the human curator. A visually tidy screen is not evidence of a tidy archive.
+
+## Metadata evidence in 0.3
+
+- Online search uses MusicBrainz recording results.
+- Candidates are ranked by MusicBrainz relevance with a duration-difference penalty.
+- No online result is auto-applied.
+- Applying a result changes the canonical Muse record, not the embedded tags in the source audio file.
+- Unknown files still require acoustic fingerprinting before they can be identified with high confidence.
 
 ## Admission rule
 
