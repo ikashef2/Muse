@@ -1,0 +1,44 @@
+package com.kashef.archive.data
+
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
+enum class ArchiveStatus {
+    VERIFIED,
+    NEEDS_REVIEW,
+    UNIDENTIFIED,
+    DUPLICATE,
+    LOW_QUALITY,
+    CORRUPTED,
+    IGNORED,
+    TRASH_SUGGESTED,
+}
+
+@Entity(tableName = "tracks")
+data class TrackEntity(
+    @PrimaryKey val contentUri: String,
+    val mediaStoreId: Long,
+    val displayName: String,
+    val title: String,
+    val artist: String,
+    val albumArtist: String,
+    val album: String,
+    val genre: String,
+    val year: Int?,
+    val trackNumber: Int?,
+    val discNumber: Int?,
+    val durationMs: Long,
+    val sizeBytes: Long,
+    val mimeType: String,
+    val bitrate: Int?,
+    val hasArtwork: Boolean,
+    val dateModifiedSeconds: Long,
+    val healthScore: Int,
+    val issueCodes: String,
+    val status: ArchiveStatus,
+    val isUserEdited: Boolean = false,
+    val verifiedAtMillis: Long? = null,
+) {
+    val issues: List<String>
+        get() = issueCodes.split('|').filter(String::isNotBlank)
+}
