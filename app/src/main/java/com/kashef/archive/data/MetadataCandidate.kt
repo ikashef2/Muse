@@ -10,4 +10,6 @@ data class MetadataCandidate(
     val year: Int?,
     val confidence: Int,
     val durationDifferenceMs: Long?,
+    val source: String = "MusicBrainz text search",
+    val acoustId: String = "",
 )

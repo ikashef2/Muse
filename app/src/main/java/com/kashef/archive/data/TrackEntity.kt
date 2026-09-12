@@ -2,6 +2,7 @@ package com.kashef.archive.data
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import com.kashef.archive.domain.MoodClassifier
 
 enum class ArchiveStatus {
     VERIFIED,
@@ -38,7 +39,21 @@ data class TrackEntity(
     val status: ArchiveStatus,
     val isUserEdited: Boolean = false,
     val verifiedAtMillis: Long? = null,
+    val originalTitle: String = "",
+    val originalArtist: String = "",
+    val originalAlbumArtist: String = "",
+    val originalAlbum: String = "",
+    val inferredMoodTags: String = "",
+    val manualMoodTags: String = "",
+    val fingerprint: String = "",
+    val acoustId: String = "",
+    val musicBrainzRecordingId: String = "",
+    val matchConfidence: Int? = null,
+    val matchSource: String = "",
 ) {
     val issues: List<String>
         get() = issueCodes.split('|').filter(String::isNotBlank)
+
+    val moods: Set<String>
+        get() = MoodClassifier.effective(this)
 }

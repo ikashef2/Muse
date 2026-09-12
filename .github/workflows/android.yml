@@ -1,10 +1,13 @@
 name: Android Cloud Build
+# v0.4 native toolchain
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -24,25 +27,44 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.9"
+          gradle-version: '8.9'
+
+      - name: Install pinned Android native toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          sdkmanager_path="${sdk_root}/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "${sdkmanager_path}" ]]; then
+            sdkmanager_path="$(find "${sdk_root}/cmdline-tools" -type f -name sdkmanager -perm -111 2>/dev/null | head -n 1 || true)"
+          fi
+          if [[ -z "${sdkmanager_path}" || ! -x "${sdkmanager_path}" ]]; then
+            echo "Unable to locate sdkmanager under ${sdk_root}" >&2
+            find "${sdk_root}" -maxdepth 4 -type f -name sdkmanager -print >&2 || true
+            exit 1
+          fi
+          yes | "${sdkmanager_path}" --licenses >/dev/null || true
+          "${sdkmanager_path}" "ndk;27.2.12479018" "cmake;3.22.1"
 
       - name: Run tests and build APK
+        env:
+          ACOUSTID_CLIENT_KEY: ${{ secrets.ACOUSTID_CLIENT_KEY }}
         run: gradle --no-daemon testDebugUnitTest assembleDebug
 
       - name: Prepare downloadable APK
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/Archive-debug-${{ github.run_number }}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/Muse-v0.4.0-${{ github.run_number }}.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Archive-debug-apk
+          name: Muse-v0.4.0-apk
           path: dist/*.apk
           if-no-files-found: error
           retention-days: 30

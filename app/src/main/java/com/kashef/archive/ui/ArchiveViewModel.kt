@@ -14,6 +14,8 @@ import com.kashef.archive.data.MusicScanWorker
 import com.kashef.archive.data.MetadataCandidate
 import com.kashef.archive.data.ScanReport
 import com.kashef.archive.data.TrackEntity
+import com.kashef.archive.data.PreparedTagWrite
+import com.kashef.archive.domain.MoodClassifier
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -48,6 +50,8 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
     private val report = MutableStateFlow<ScanReport?>(null)
     private val error = MutableStateFlow<String?>(null)
     private val metadataSearch = MutableStateFlow(MetadataSearchState())
+    private val mutablePendingTagWrite = MutableStateFlow<PreparedTagWrite?>(null)
+    val pendingTagWrite: StateFlow<PreparedTagWrite?> = mutablePendingTagWrite
     val playback = (application as ArchiveApplication).playback
 
     val state: StateFlow<ArchiveUiState> = combine(
@@ -74,6 +78,9 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
     fun save(track: TrackEntity) = viewModelScope.launch { repository.edit(track) }
     fun verify(track: TrackEntity) = viewModelScope.launch { repository.verify(track.contentUri) }
     fun suggestTrash(track: TrackEntity) = viewModelScope.launch { repository.suggestTrash(track.contentUri) }
+    fun toggleMood(track: TrackEntity, mood: String) = viewModelScope.launch {
+        repository.setManualMoodTags(track.contentUri, MoodClassifier.toggle(track, mood))
+    }
 
     fun playTrack(track: TrackEntity) {
         val queue = state.value.tracks.filter {
@@ -106,8 +113,25 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun applyMetadata(track: TrackEntity, candidate: MetadataCandidate) = viewModelScope.launch {
-        repository.applyMetadataCandidate(track, candidate)
         metadataSearch.value = MetadataSearchState()
+        runCatching { repository.applyMetadataCandidate(track, candidate) }
+            .onSuccess { mutablePendingTagWrite.value = it }
+            .onFailure { error.value = it.message ?: "Muse could not prepare the tag rewrite." }
+    }
+
+    fun commitPendingTagWrite() {
+        val pending = mutablePendingTagWrite.value ?: return
+        mutablePendingTagWrite.value = null
+        viewModelScope.launch {
+            runCatching { repository.commitTagWrite(pending) }
+                .onSuccess { scan() }
+                .onFailure { error.value = it.message ?: "The tag rewrite failed." }
+        }
+    }
+
+    fun cancelPendingTagWrite() {
+        mutablePendingTagWrite.value?.let(repository::cancelTagWrite)
+        mutablePendingTagWrite.value = null
     }
 
     fun clearMetadataSearch() {

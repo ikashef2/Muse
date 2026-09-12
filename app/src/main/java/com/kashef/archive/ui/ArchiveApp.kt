@@ -1,47 +1,69 @@
 package com.kashef.archive.ui
 
 import android.Manifest
+import android.app.Activity
+import android.net.Uri
 import android.os.Build
+import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.HealthAndSafety
-import androidx.compose.material.icons.filled.Inbox
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.LibraryMusic
-import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -50,18 +72,22 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -74,88 +100,106 @@ import com.kashef.archive.domain.GeneratedPlaylist
 import com.kashef.archive.domain.PlaylistGenerator
 import com.kashef.archive.domain.PlaylistMood
 import com.kashef.archive.playback.PlaybackState
+import java.util.Locale
 
 private enum class Destination(val label: String, val icon: ImageVector) {
-    OVERVIEW("Overview", Icons.Default.HealthAndSafety),
-    INBOX("Inbox", Icons.Default.Inbox),
+    PLAYER("Player", Icons.Default.Headphones),
     LIBRARY("Library", Icons.Default.LibraryMusic),
-    MIXES("Mixes", Icons.Default.QueueMusic),
+    PLAYLISTS("Playlists", Icons.Default.QueueMusic),
+    IMPORT("Import", Icons.Default.FileDownload),
 }
 
+private enum class LibraryMode(val label: String) { ARTISTS("Artists"), ALBUMS("Albums"), SONGS("Songs"), GENRES("Genres") }
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ArchiveApp(viewModel: ArchiveViewModel = viewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val playback by viewModel.playback.state.collectAsStateWithLifecycle()
-    var destination by remember { mutableStateOf(Destination.OVERVIEW) }
+    val pendingTagWrite by viewModel.pendingTagWrite.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    var destination by remember { mutableStateOf(Destination.PLAYER) }
     var editorTrack by remember { mutableStateOf<TrackEntity?>(null) }
-    val generatedMixes = remember(state.tracks) {
-        val generator = PlaylistGenerator()
-        PlaylistMood.entries.map { generator.generate(state.tracks, it) }
-    }
-    val audioPermission = if (Build.VERSION.SDK_INT >= 33) {
-        Manifest.permission.READ_MEDIA_AUDIO
-    } else Manifest.permission.READ_EXTERNAL_STORAGE
+    val generator = remember { PlaylistGenerator() }
+    val mixes = remember(state.tracks) { PlaylistMood.entries.map { generator.generate(state.tracks, it) } }
+    val currentTrack = state.tracks.firstOrNull { it.contentUri == playback.mediaId }
+    val audioPermission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
     val permissions = buildList {
         add(audioPermission)
         if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
     }.toTypedArray()
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { grants -> if (grants[audioPermission] == true) viewModel.scan() }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+        if (grants[audioPermission] == true) viewModel.scan()
+    }
+    val writePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) viewModel.commitPendingTagWrite()
+        else viewModel.cancelPendingTagWrite()
+    }
+    val requestScan = { permissionLauncher.launch(permissions) }
+
+    LaunchedEffect(pendingTagWrite) {
+        val pending = pendingTagWrite ?: return@LaunchedEffect
+        if (Build.VERSION.SDK_INT >= 30) {
+            val request = MediaStore.createWriteRequest(context.contentResolver, listOf(Uri.parse(pending.contentUri)))
+            writePermissionLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
+        } else {
+            viewModel.commitPendingTagWrite()
+        }
+    }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
-            Column {
-                if (playback.mediaId != null) {
-                    MiniPlayer(
-                        state = playback,
-                        onToggle = viewModel.playback::toggle,
-                        onPrevious = viewModel.playback::previous,
-                        onNext = viewModel.playback::next,
-                    )
-                }
-                NavigationBar {
-                    Destination.entries.forEach { item ->
-                        NavigationBarItem(
-                            selected = destination == item,
-                            onClick = { destination = item },
-                            icon = { Icon(item.icon, contentDescription = null) },
-                            label = { Text(item.label) },
-                        )
+            Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
+                Column {
+                    if (destination != Destination.PLAYER && playback.mediaId != null) {
+                        MiniPlayer(playback, viewModel.playback::toggle, viewModel.playback::next)
+                    }
+                    NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                        Destination.entries.forEach { item ->
+                            NavigationBarItem(
+                                selected = destination == item,
+                                onClick = { destination = item },
+                                icon = { Icon(item.icon, contentDescription = null) },
+                                label = { Text(item.label) },
+                            )
+                        }
                     }
                 }
             }
-        }
+        },
     ) { padding ->
         when (destination) {
-            Destination.OVERVIEW -> OverviewScreen(
+            Destination.PLAYER -> PlayerScreen(
                 state = state,
-                onScan = { permissionLauncher.launch(permissions) },
+                playback = playback,
+                currentTrack = currentTrack,
+                mixes = mixes,
+                onScan = requestScan,
+                onPlayTrack = viewModel::playTrack,
+                onPlayMix = viewModel::playQueue,
+                onToggle = viewModel.playback::toggle,
+                onPrevious = viewModel.playback::previous,
+                onNext = viewModel.playback::next,
+                onShuffle = viewModel.playback::toggleShuffle,
+                onSeek = viewModel.playback::seekTo,
+                onToggleMood = viewModel::toggleMood,
                 modifier = Modifier.padding(padding),
             )
-            Destination.INBOX -> TrackListScreen(
-                title = "Review inbox",
-                subtitle = "Nothing enters your archive without earning its place.",
-                tracks = state.tracks.filter { it.status != ArchiveStatus.VERIFIED },
-                onEdit = { editorTrack = it },
-                onPlay = viewModel::playTrack,
-                onVerify = viewModel::verify,
-                onTrash = viewModel::suggestTrash,
-                modifier = Modifier.padding(padding),
-            )
-            Destination.LIBRARY -> TrackListScreen(
-                title = "Verified library",
-                subtitle = "Only approved, canonical records live here.",
-                tracks = state.tracks.filter { it.status == ArchiveStatus.VERIFIED },
-                onEdit = { editorTrack = it },
-                onPlay = viewModel::playTrack,
-                onVerify = viewModel::verify,
-                onTrash = viewModel::suggestTrash,
-                modifier = Modifier.padding(padding),
-            )
-            Destination.MIXES -> MixesScreen(
-                mixes = generatedMixes,
+            Destination.LIBRARY -> LibraryScreen(state.tracks, viewModel::playTrack, Modifier.padding(padding))
+            Destination.PLAYLISTS -> PlaylistsScreen(
+                mixes = mixes,
+                currentTrack = currentTrack,
                 onPlay = viewModel::playQueue,
+                onToggleMood = viewModel::toggleMood,
+                modifier = Modifier.padding(padding),
+            )
+            Destination.IMPORT -> ImportScreen(
+                state = state,
+                onScan = requestScan,
+                onEdit = { editorTrack = it },
+                onVerify = viewModel::verify,
+                onTrash = viewModel::suggestTrash,
                 modifier = Modifier.padding(padding),
             )
         }
@@ -183,259 +227,388 @@ fun ArchiveApp(viewModel: ArchiveViewModel = viewModel()) {
 }
 
 @Composable
-private fun MiniPlayer(
-    state: PlaybackState,
+private fun AppHeader(eyebrow: String, title: String, action: ImageVector? = null) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(eyebrow.uppercase(Locale.US), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
+            Text(title, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+        }
+        if (action != null) {
+            FilledTonalButton(onClick = {}) { Icon(action, contentDescription = null) }
+        }
+    }
+}
+
+@Composable
+private fun PlayerScreen(
+    state: ArchiveUiState,
+    playback: PlaybackState,
+    currentTrack: TrackEntity?,
+    mixes: List<GeneratedPlaylist>,
+    onScan: () -> Unit,
+    onPlayTrack: (TrackEntity) -> Unit,
+    onPlayMix: (List<TrackEntity>) -> Unit,
     onToggle: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
+    onShuffle: () -> Unit,
+    onSeek: (Long) -> Unit,
+    onToggleMood: (TrackEntity, String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 8.dp) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                modifier = Modifier.size(42.dp).background(MaterialTheme.colorScheme.primary, RoundedCornerShape(12.dp)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(Icons.Default.LibraryMusic, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary)
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        item { AppHeader("Muse / 04", "Now playing", Icons.Default.Settings) }
+        if (state.tracks.isEmpty()) {
+            item { EmptyLibrary(onScan, state.isScanning) }
+        } else {
+            val shownTrack = currentTrack ?: state.tracks.first()
+            item { PlayerArtwork(shownTrack) }
+            item {
+                Row(verticalAlignment = Alignment.Top) {
+                    Column(Modifier.weight(1f)) {
+                        Text(shownTrack.title.ifBlank { shownTrack.displayName }, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(shownTrack.artist.ifBlank { "Unknown artist" }, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                    }
+                    IconButton(onClick = {}) { Icon(Icons.Default.MoreVert, contentDescription = "Track actions") }
+                }
+            }
+            item {
+                val duration = playback.durationMs.takeIf { playback.mediaId == shownTrack.contentUri && it > 0 } ?: shownTrack.durationMs
+                val position = playback.positionMs.takeIf { playback.mediaId == shownTrack.contentUri } ?: 0L
+                Column {
+                    Slider(
+                        value = position.coerceIn(0L, duration.coerceAtLeast(1L)).toFloat(),
+                        onValueChange = { if (playback.mediaId == shownTrack.contentUri) onSeek(it.toLong()) },
+                        valueRange = 0f..duration.coerceAtLeast(1L).toFloat(),
+                    )
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(formatTime(position), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(formatTime(duration), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+            item {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onShuffle) { Icon(Icons.Default.Shuffle, contentDescription = "Shuffle", tint = if (playback.shuffleEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) }
+                    IconButton(onClick = onPrevious) { Icon(Icons.Default.SkipPrevious, contentDescription = "Previous", modifier = Modifier.size(34.dp)) }
+                    FilledIconButton(
+                        onClick = { if (playback.mediaId == shownTrack.contentUri) onToggle() else onPlayTrack(shownTrack) },
+                        modifier = Modifier.size(68.dp),
+                        shape = CircleShape,
+                    ) {
+                        Icon(if (playback.isPlaying && playback.mediaId == shownTrack.contentUri) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = "Play or pause", modifier = Modifier.size(38.dp))
+                    }
+                    IconButton(onClick = onNext) { Icon(Icons.Default.SkipNext, contentDescription = "Next", modifier = Modifier.size(34.dp)) }
+                    IconButton(onClick = {}) { Icon(Icons.Default.MoreVert, contentDescription = "More playback options") }
+                }
+            }
+            item { SectionTitle("Made for this moment", "Generated from your archive") }
+            item {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(mixes.filter { it.mood != PlaylistMood.DISCOVERY }, key = { it.mood.name }) { mix ->
+                        MoodTile(mix, enabled = mix.tracks.isNotEmpty()) { onPlayMix(mix.tracks) }
+                    }
+                }
+            }
+            item {
+                MoodTeacher(track = shownTrack, onToggle = { onToggleMood(shownTrack, it) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerArtwork(track: TrackEntity) {
+    val hue = (track.title.hashCode().toUInt().toLong() % 3).toInt()
+    val secondary = listOf(Color(0xFF5A2412), Color(0xFF3B203E), Color(0xFF432A16))[hue]
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .background(Brush.linearGradient(listOf(Color(0xFFFF6B1A), secondary, Color(0xFF090909))), RoundedCornerShape(28.dp))
+            .padding(24.dp),
+    ) {
+        Text("MUSE ARCHIVE", style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = .72f))
+        Text(
+            track.title.ifBlank { "UNKNOWN TRACK" }.uppercase(Locale.US),
+            modifier = Modifier.align(Alignment.BottomStart),
+            style = MaterialTheme.typography.displaySmall,
+            fontWeight = FontWeight.Black,
+            color = Color.White,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun EmptyLibrary(onScan: () -> Unit, isScanning: Boolean) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant), shape = RoundedCornerShape(26.dp)) {
+        Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Icon(Icons.Default.MusicNote, contentDescription = null, modifier = Modifier.size(46.dp), tint = MaterialTheme.colorScheme.primary)
+            Text("Bring your music into Muse", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("Your audio stays on this device. Muse indexes it, checks it, and builds a player around it.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Button(onClick = onScan, enabled = !isScanning, modifier = Modifier.fillMaxWidth()) {
+                if (isScanning) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Refresh, contentDescription = null)
+                Spacer(Modifier.width(8.dp)); Text(if (isScanning) "Scanning…" else "Scan this device")
+            }
+        }
+    }
+}
+
+@Composable
+private fun LibraryScreen(tracks: List<TrackEntity>, onPlay: (TrackEntity) -> Unit, modifier: Modifier = Modifier) {
+    var query by remember { mutableStateOf("") }
+    var mode by remember { mutableStateOf(LibraryMode.ARTISTS) }
+    val filtered = remember(tracks, query) {
+        tracks.filter { query.isBlank() || listOf(it.title, it.artist, it.album, it.genre).any { field -> field.contains(query, true) } }
+    }
+    LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item { AppHeader("Your archive", "Library") }
+        item {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier.fillMaxWidth(),
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                placeholder = { Text("Artist, album or song") },
+                singleLine = true,
+                shape = RoundedCornerShape(16.dp),
+            )
+        }
+        item {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LibraryMode.entries.forEach { item ->
+                    if (mode == item) Button(onClick = { mode = item }) { Text(item.label) }
+                    else OutlinedButton(onClick = { mode = item }) { Text(item.label) }
+                }
+            }
+        }
+        when (mode) {
+            LibraryMode.SONGS -> items(filtered, key = TrackEntity::contentUri) { TrackRow(it, onPlay) }
+            LibraryMode.ARTISTS -> {
+                val artists = filtered.groupBy { it.artist.ifBlank { "Unknown artist" } }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
+                items(artists.entries.toList(), key = { it.key }) { (artist, artistTracks) ->
+                    CollectionRow(artist, "${artistTracks.size} tracks", Icons.Default.Headphones) { onPlay(artistTracks.first()) }
+                }
+            }
+            LibraryMode.ALBUMS -> {
+                val albums = filtered.groupBy { it.album.ifBlank { "Unknown album" } }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
+                items(albums.entries.toList(), key = { it.key }) { (album, albumTracks) ->
+                    CollectionRow(album, "${albumTracks.firstOrNull()?.artist.orEmpty()} · ${albumTracks.size} tracks", Icons.Default.Album) { onPlay(albumTracks.first()) }
+                }
+            }
+            LibraryMode.GENRES -> {
+                val genres = filtered.groupBy { it.genre.ifBlank { "Unclassified" } }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
+                items(genres.entries.toList(), key = { it.key }) { (genre, genreTracks) ->
+                    CollectionRow(genre, "${genreTracks.size} tracks", Icons.Default.MusicNote) { onPlay(genreTracks.first()) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CollectionRow(title: String, subtitle: String, icon: ImageVector, onClick: () -> Unit) {
+    Card(Modifier.fillMaxWidth().clickable(onClick = onClick), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant), shape = RoundedCornerShape(18.dp)) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(52.dp).background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
+                Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
             }
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Text(state.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
-                Text(state.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
+                Text(title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            IconButton(onClick = onPrevious) { Icon(Icons.Default.SkipPrevious, contentDescription = "Previous") }
-            IconButton(onClick = onToggle) {
-                Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = "Play or pause")
-            }
-            IconButton(onClick = onNext) { Icon(Icons.Default.SkipNext, contentDescription = "Next") }
+            Icon(Icons.Default.PlayArrow, contentDescription = "Play")
         }
     }
 }
 
 @Composable
-private fun OverviewScreen(
-    state: ArchiveUiState,
-    onScan: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
-    ) {
-        item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("MUSE / 03", color = MaterialTheme.colorScheme.primary)
-                    Text(
-                        "Order for your music.",
-                        style = MaterialTheme.typography.headlineLarge,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Text(
-                        "Every file inspected. Every record intentional.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(42.dp))
-            }
+private fun TrackRow(track: TrackEntity, onPlay: (TrackEntity) -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable { onPlay(track) }.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(48.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.MusicNote, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
         }
-        item {
-            HealthHero(score = state.averageHealth, count = state.tracks.size)
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+            Text(track.title.ifBlank { track.displayName }, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(listOf(track.artist, track.album).filter(String::isNotBlank).joinToString(" · ").ifBlank { "Unknown record" }, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                MetricCard("Verified", state.verifiedCount, Modifier.weight(1f), Color(0xFFB7FF6A))
-                MetricCard("Review", state.reviewCount, Modifier.weight(1f), Color(0xFFFFC66A))
-                MetricCard("Duplicates", state.duplicateCount, Modifier.weight(1f), Color(0xFFFF766E))
-            }
-        }
-        item {
-            Button(onClick = onScan, enabled = !state.isScanning, modifier = Modifier.fillMaxWidth()) {
-                if (state.isScanning) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                } else Icon(Icons.Default.Refresh, contentDescription = null)
-                Spacer(Modifier.size(8.dp))
-                Text(if (state.tracks.isEmpty()) "Scan this device" else "Scan for changes")
-            }
-        }
-        state.report?.let { report ->
-            item {
-                Text(
-                    "Last scan found ${report.found} tracks · ${report.addedOrUpdated} changed",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        state.error?.let { message -> item { Text(message, color = MaterialTheme.colorScheme.error) } }
+        IconButton(onClick = { onPlay(track) }) { Icon(Icons.Default.PlayArrow, contentDescription = "Play") }
     }
 }
 
 @Composable
-private fun HealthHero(score: Int, count: Int) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-        shape = RoundedCornerShape(28.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            modifier = Modifier.padding(22.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(86.dp)
-                    .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(24.dp)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("$score", color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
-            }
-            Column(Modifier.padding(start = 18.dp)) {
-                Text("Metadata health", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text("$count indexed tracks", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(if (score >= 90) "Pristine." else "The archive needs attention.", color = MaterialTheme.colorScheme.primary)
-            }
-        }
-    }
-}
-
-@Composable
-private fun MetricCard(label: String, value: Int, modifier: Modifier, accent: Color) {
-    Card(modifier = modifier, shape = RoundedCornerShape(18.dp)) {
-        Column(Modifier.padding(14.dp)) {
-            Text(value.toString(), style = MaterialTheme.typography.headlineSmall, color = accent, fontWeight = FontWeight.Bold)
-            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
-private fun TrackListScreen(
-    title: String,
-    subtitle: String,
-    tracks: List<TrackEntity>,
-    onEdit: (TrackEntity) -> Unit,
-    onPlay: (TrackEntity) -> Unit,
-    onVerify: (TrackEntity) -> Unit,
-    onTrash: (TrackEntity) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        item {
-            Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(10.dp))
-        }
-        if (tracks.isEmpty()) {
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Text("Nothing here yet.", modifier = Modifier.padding(20.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        }
-        items(tracks, key = TrackEntity::contentUri) { track ->
-            TrackCard(track, onEdit, onPlay, onVerify, onTrash)
-        }
-    }
-}
-
-@Composable
-private fun TrackCard(
-    track: TrackEntity,
-    onEdit: (TrackEntity) -> Unit,
-    onPlay: (TrackEntity) -> Unit,
-    onVerify: (TrackEntity) -> Unit,
-    onTrash: (TrackEntity) -> Unit,
-) {
-    Card(modifier = Modifier.fillMaxWidth().clickable { onPlay(track) }, shape = RoundedCornerShape(20.dp)) {
-        Row(
-            modifier = Modifier.padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .background(scoreColor(track.healthScore), RoundedCornerShape(14.dp)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(track.healthScore.toString(), color = Color(0xFF10120F), fontWeight = FontWeight.Black)
-            }
-            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Text(track.title.ifBlank { track.displayName }, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
-                Text(
-                    listOf(track.artist, track.album).filter(String::isNotBlank).joinToString(" · ").ifBlank { "Unknown record" },
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    track.status.name.replace('_', ' '),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = scoreColor(track.healthScore),
-                )
-            }
-            IconButton(onClick = { onPlay(track) }) { Icon(Icons.Default.PlayArrow, contentDescription = "Play") }
-            IconButton(onClick = { onEdit(track) }) { Icon(Icons.Default.Edit, contentDescription = "Edit") }
-            if (track.status != ArchiveStatus.VERIFIED && track.healthScore >= 90) {
-                IconButton(onClick = { onVerify(track) }) { Icon(Icons.Default.CheckCircle, contentDescription = "Verify") }
-            }
-            IconButton(onClick = { onTrash(track) }) { Icon(Icons.Default.DeleteOutline, contentDescription = "Suggest trash") }
-        }
-    }
-}
-
-@Composable
-private fun MixesScreen(
+private fun PlaylistsScreen(
     mixes: List<GeneratedPlaylist>,
+    currentTrack: TrackEntity?,
     onPlay: (List<TrackEntity>) -> Unit,
+    onToggleMood: (TrackEntity, String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        item {
-            Text("Generated mixes", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-            Text("Built locally from genre, album, title, and archive health.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(8.dp))
-        }
+    LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item { AppHeader("Adaptive mixes", "Playlists") }
         items(mixes, key = { it.mood.name }) { mix ->
             Card(
                 modifier = Modifier.fillMaxWidth().clickable(enabled = mix.tracks.isNotEmpty()) { onPlay(mix.tracks) },
+                colors = CardDefaults.cardColors(containerColor = if (mix.mood == PlaylistMood.ENERGY) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant),
                 shape = RoundedCornerShape(22.dp),
             ) {
                 Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier.size(54.dp).background(MaterialTheme.colorScheme.primary, RoundedCornerShape(16.dp)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(Icons.Default.QueueMusic, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary)
+                    Box(Modifier.size(56.dp).background(MaterialTheme.colorScheme.primary, RoundedCornerShape(17.dp)), contentAlignment = Alignment.Center) {
+                        Icon(moodIcon(mix.mood), contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary)
                     }
                     Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
                         Text(mix.mood.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                        Text(mix.mood.subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(mix.mood.subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
                         Text("${mix.tracks.size} tracks", color = MaterialTheme.colorScheme.primary)
                     }
                     Icon(Icons.Default.PlayArrow, contentDescription = "Play ${mix.mood.title}")
                 }
             }
         }
+        currentTrack?.let { track -> item { MoodTeacher(track, onToggle = { onToggleMood(track, it) }) } }
     }
 }
 
-private fun scoreColor(score: Int): Color = when {
-    score >= 90 -> Color(0xFFB7FF6A)
-    score >= 70 -> Color(0xFFFFC66A)
-    else -> Color(0xFFFF766E)
+@Composable
+private fun MoodTeacher(track: TrackEntity, onToggle: (String) -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant), shape = RoundedCornerShape(22.dp)) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Teach Muse this track", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("Automatic suggestions stay editable. Your corrections always win.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("CALM", "ENERGY", "FOCUS", "NIGHT").forEach { mood ->
+                    AssistChip(
+                        onClick = { onToggle(mood) },
+                        label = { Text(mood.lowercase().replaceFirstChar(Char::uppercase)) },
+                        leadingIcon = if (mood in track.moods) {
+                            { Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                        } else null,
+                    )
+                }
+            }
+        }
+    }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ImportScreen(
+    state: ArchiveUiState,
+    onScan: () -> Unit,
+    onEdit: (TrackEntity) -> Unit,
+    onVerify: (TrackEntity) -> Unit,
+    onTrash: (TrackEntity) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val pending = state.tracks.filter { it.status != ArchiveStatus.VERIFIED }
+    LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item { AppHeader("Metadata workspace", "Import") }
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer), shape = RoundedCornerShape(24.dp)) {
+                Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Ready to inspect", color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    Text("${pending.size} tracks", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+                    Button(onClick = onScan, enabled = !state.isScanning, modifier = Modifier.fillMaxWidth()) {
+                        if (state.isScanning) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Refresh, contentDescription = null)
+                        Spacer(Modifier.width(8.dp)); Text(if (state.isScanning) "Scanning device…" else "Scan for new music")
+                    }
+                }
+            }
+        }
+        state.report?.let { report -> item { Text("${report.found} indexed · ${report.addedOrUpdated} changed", color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+        state.error?.let { item { Text(it, color = MaterialTheme.colorScheme.error) } }
+        if (pending.isEmpty()) item {
+            Text(if (state.tracks.isEmpty()) "Scan your device to begin." else "Your archive is clean.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        items(pending, key = TrackEntity::contentUri) { track ->
+            ImportTrackCard(track, onEdit, onVerify, onTrash)
+        }
+    }
+}
+
+@Composable
+private fun ImportTrackCard(track: TrackEntity, onEdit: (TrackEntity) -> Unit, onVerify: (TrackEntity) -> Unit, onTrash: (TrackEntity) -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant), shape = RoundedCornerShape(20.dp)) {
+        Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(if (track.matchSource == "ACOUSTID_FINGERPRINT") Icons.Default.Fingerprint else Icons.Default.MusicNote, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
+                    Text(track.title.ifBlank { track.displayName }, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(track.artist.ifBlank { "Unknown artist" }, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                }
+                Text("${track.healthScore}%", color = scoreColor(track.healthScore), fontWeight = FontWeight.Bold)
+            }
+            if (track.originalTitle.isNotBlank()) Text("Original-script alias preserved for matching", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .45f))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilledTonalButton(onClick = { onEdit(track) }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.AutoAwesome, null); Spacer(Modifier.width(5.dp)); Text("Identify") }
+                if (track.healthScore >= 90) IconButton(onClick = { onVerify(track) }) { Icon(Icons.Default.CheckCircle, "Verify") }
+                IconButton(onClick = { onTrash(track) }) { Icon(Icons.Default.DeleteOutline, "Suggest removal") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MiniPlayer(state: PlaybackState, onToggle: () -> Unit, onNext: () -> Unit) {
+    Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(42.dp).background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.MusicNote, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        }
+        Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
+            Text(state.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
+            Text(state.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        IconButton(onClick = onToggle) { Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, "Play or pause") }
+        IconButton(onClick = onNext) { Icon(Icons.Default.SkipNext, "Next") }
+    }
+}
+
+@Composable
+private fun MoodTile(mix: GeneratedPlaylist, enabled: Boolean, onClick: () -> Unit) {
+    Card(
+        modifier = Modifier.width(148.dp).height(116.dp).clickable(enabled = enabled, onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        shape = RoundedCornerShape(20.dp),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.SpaceBetween) {
+            Icon(moodIcon(mix.mood), contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.weight(1f))
+            Text(mix.mood.title, fontWeight = FontWeight.Bold)
+            Text("${mix.tracks.size} tracks", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+private fun moodIcon(mood: PlaylistMood): ImageVector = when (mood) {
+    PlaylistMood.FOCUS -> Icons.Default.Headphones
+    PlaylistMood.ENERGY -> Icons.Default.LocalFireDepartment
+    PlaylistMood.CALM -> Icons.Default.AutoAwesome
+    PlaylistMood.NIGHT -> Icons.Default.DarkMode
+    PlaylistMood.DISCOVERY -> Icons.Default.Shuffle
+}
+
+@Composable
+private fun SectionTitle(title: String, subtitle: String) {
+    Column { Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+}
+
+private fun scoreColor(score: Int): Color = when {
+    score >= 90 -> Color(0xFFFF8A4C)
+    score >= 70 -> Color(0xFFFFB36B)
+    else -> Color(0xFFFF6B62)
+}
+
+private fun formatTime(milliseconds: Long): String {
+    val seconds = (milliseconds / 1_000L).coerceAtLeast(0L)
+    return "%d:%02d".format(Locale.US, seconds / 60, seconds % 60)
+}
+
 @Composable
 private fun MetadataEditor(
     initial: TrackEntity,
@@ -453,22 +626,25 @@ private fun MetadataEditor(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Canonical metadata") },
+        title = { Text("Review metadata") },
         text = {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                item { Text("Edit the archive record. The source file is not rewritten in this build.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 item {
-                    FilledTonalButton(onClick = onSearch, enabled = !searchState.isSearching, modifier = Modifier.fillMaxWidth()) {
-                        if (searchState.isSearching) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                        else Icon(Icons.Default.AutoFixHigh, contentDescription = null)
-                        Spacer(Modifier.size(8.dp))
-                        Text(if (searchState.isSearching) "Searching MusicBrainz…" else "Find verified metadata online")
+                    Text("Fingerprint evidence comes first. Latin-script metadata is the canonical archive format.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (initial.originalTitle.isNotBlank() || initial.originalArtist.isNotBlank()) item {
+                    Text("Original: ${listOf(initial.originalTitle, initial.originalArtist).filter(String::isNotBlank).joinToString(" · ")}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                item {
+                    Button(onClick = onSearch, enabled = !searchState.isSearching, modifier = Modifier.fillMaxWidth()) {
+                        if (searchState.isSearching) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Fingerprint, contentDescription = null)
+                        Spacer(Modifier.width(8.dp)); Text(if (searchState.isSearching) "Fingerprinting and searching…" else "Identify from audio")
                     }
                 }
                 if (searchState.trackUri == initial.contentUri) {
                     searchState.error?.let { message -> item { Text(message, color = MaterialTheme.colorScheme.error) } }
                     items(searchState.candidates, key = MetadataCandidate::recordingId) { candidate ->
-                        MetadataCandidateCard(candidate = candidate, onApply = { onApply(candidate) })
+                        MetadataCandidateCard(candidate) { onApply(candidate) }
                     }
                 }
                 item { OutlinedTextField(title, { title = it }, label = { Text("Title") }, modifier = Modifier.fillMaxWidth()) }
@@ -478,34 +654,25 @@ private fun MetadataEditor(
                 item { OutlinedTextField(genre, { genre = it }, label = { Text("Genre") }, modifier = Modifier.fillMaxWidth()) }
             }
         },
-        confirmButton = {
-            Button(onClick = {
-                onSave(initial.copy(title = title, artist = artist, albumArtist = albumArtist, album = album, genre = genre))
-            }) { Text("Save draft") }
-        },
+        confirmButton = { Button(onClick = { onSave(initial.copy(title = title, artist = artist, albumArtist = albumArtist, album = album, genre = genre)) }) { Text("Save canonical record") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 
 @Composable
 private fun MetadataCandidateCard(candidate: MetadataCandidate, onApply: () -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh), shape = RoundedCornerShape(16.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(candidate.title, fontWeight = FontWeight.Bold)
                     Text(candidate.artist, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        listOfNotNull(candidate.album.takeIf(String::isNotBlank), candidate.year?.toString()).joinToString(" · "),
-                        style = MaterialTheme.typography.labelMedium,
-                    )
+                    Text(listOfNotNull(candidate.album.takeIf(String::isNotBlank), candidate.year?.toString()).joinToString(" · "), style = MaterialTheme.typography.labelMedium)
                 }
                 Text("${candidate.confidence}%", color = scoreColor(candidate.confidence), fontWeight = FontWeight.Bold)
             }
-            candidate.durationDifferenceMs?.let {
-                Text("Duration difference: ${it / 1_000}s", style = MaterialTheme.typography.labelSmall)
-            }
-            Button(onClick = onApply, modifier = Modifier.fillMaxWidth()) { Text("Apply suggestion") }
+            Text(candidate.source, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            Button(onClick = onApply, modifier = Modifier.fillMaxWidth()) { Text("Use this match") }
         }
     }
 }
