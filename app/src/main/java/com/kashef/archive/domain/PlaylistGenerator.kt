@@ -24,7 +24,12 @@ class PlaylistGenerator {
                 it.status != ArchiveStatus.TRASH_SUGGESTED &&
                 it.durationMs > 0
         }
-        val ranked = playable.sortedWith(
+        val eligible = if (mood == PlaylistMood.DISCOVERY) {
+            playable
+        } else {
+            playable.filter { mood.name in it.moods }
+        }
+        val ranked = eligible.sortedWith(
             compareByDescending<TrackEntity> { score(it, mood) }
                 .thenBy { stableOrder(it, mood) }
         )

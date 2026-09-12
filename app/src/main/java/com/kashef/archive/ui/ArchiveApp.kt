@@ -2,6 +2,8 @@ package com.kashef.archive.ui
 
 import android.Manifest
 import android.app.Activity
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -9,6 +11,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -27,8 +30,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Album
@@ -41,16 +46,15 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Headphones
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.LocalFireDepartment
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
@@ -73,6 +77,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -80,13 +86,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -100,6 +110,8 @@ import com.kashef.archive.domain.GeneratedPlaylist
 import com.kashef.archive.domain.PlaylistGenerator
 import com.kashef.archive.domain.PlaylistMood
 import com.kashef.archive.playback.PlaybackState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 private enum class Destination(val label: String, val icon: ImageVector) {
@@ -116,8 +128,9 @@ private enum class LibraryMode(val label: String) { ARTISTS("Artists"), ALBUMS("
 fun ArchiveApp(viewModel: ArchiveViewModel = viewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val playback by viewModel.playback.state.collectAsStateWithLifecycle()
-    val pendingTagWrite by viewModel.pendingTagWrite.collectAsStateWithLifecycle()
+    val pendingMetadataChange by viewModel.pendingMetadataChange.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val snackbarHostState = remember { SnackbarHostState() }
     var destination by remember { mutableStateOf(Destination.PLAYER) }
     var editorTrack by remember { mutableStateOf<TrackEntity?>(null) }
     val generator = remember { PlaylistGenerator() }
@@ -132,23 +145,28 @@ fun ArchiveApp(viewModel: ArchiveViewModel = viewModel()) {
         if (grants[audioPermission] == true) viewModel.scan()
     }
     val writePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK) viewModel.commitPendingTagWrite()
-        else viewModel.cancelPendingTagWrite()
+        if (result.resultCode == Activity.RESULT_OK) viewModel.commitPendingMetadataChange()
+        else viewModel.cancelPendingMetadataChange()
     }
     val requestScan = { permissionLauncher.launch(permissions) }
 
-    LaunchedEffect(pendingTagWrite) {
-        val pending = pendingTagWrite ?: return@LaunchedEffect
-        if (Build.VERSION.SDK_INT >= 30) {
+    LaunchedEffect(state.error) {
+        state.error?.let { snackbarHostState.showSnackbar(it) }
+    }
+
+    LaunchedEffect(pendingMetadataChange) {
+        val pending = pendingMetadataChange ?: return@LaunchedEffect
+        if (pending.tagWrite != null && Build.VERSION.SDK_INT >= 30) {
             val request = MediaStore.createWriteRequest(context.contentResolver, listOf(Uri.parse(pending.contentUri)))
             writePermissionLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
         } else {
-            viewModel.commitPendingTagWrite()
+            viewModel.commitPendingMetadataChange()
         }
     }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
                 Column {
@@ -186,10 +204,12 @@ fun ArchiveApp(viewModel: ArchiveViewModel = viewModel()) {
                 onToggleMood = viewModel::toggleMood,
                 modifier = Modifier.padding(padding),
             )
-            Destination.LIBRARY -> LibraryScreen(state.tracks, viewModel::playTrack, Modifier.padding(padding))
+            Destination.LIBRARY -> LibraryScreen(state.tracks, viewModel::playQueue, Modifier.padding(padding))
             Destination.PLAYLISTS -> PlaylistsScreen(
                 mixes = mixes,
-                currentTrack = currentTrack,
+                moodTrack = currentTrack
+                    ?: state.tracks.firstOrNull { it.moods.isEmpty() }
+                    ?: state.tracks.firstOrNull(),
                 onPlay = viewModel::playQueue,
                 onToggleMood = viewModel::toggleMood,
                 modifier = Modifier.padding(padding),
@@ -219,7 +239,7 @@ fun ArchiveApp(viewModel: ArchiveViewModel = viewModel()) {
                 editorTrack = null
             },
             onSave = {
-                viewModel.save(it)
+                viewModel.save(track, it)
                 editorTrack = null
             },
         )
@@ -227,14 +247,11 @@ fun ArchiveApp(viewModel: ArchiveViewModel = viewModel()) {
 }
 
 @Composable
-private fun AppHeader(eyebrow: String, title: String, action: ImageVector? = null) {
+private fun AppHeader(eyebrow: String, title: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(eyebrow.uppercase(Locale.US), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
             Text(title, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-        }
-        if (action != null) {
-            FilledTonalButton(onClick = {}) { Icon(action, contentDescription = null) }
         }
     }
 }
@@ -261,7 +278,7 @@ private fun PlayerScreen(
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
-        item { AppHeader("Muse / 04", "Now playing", Icons.Default.Settings) }
+        item { AppHeader("Muse / 04", "Now playing") }
         if (state.tracks.isEmpty()) {
             item { EmptyLibrary(onScan, state.isScanning) }
         } else {
@@ -273,7 +290,6 @@ private fun PlayerScreen(
                         Text(shownTrack.title.ifBlank { shownTrack.displayName }, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(shownTrack.artist.ifBlank { "Unknown artist" }, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                     }
-                    IconButton(onClick = {}) { Icon(Icons.Default.MoreVert, contentDescription = "Track actions") }
                 }
             }
             item {
@@ -303,7 +319,6 @@ private fun PlayerScreen(
                         Icon(if (playback.isPlaying && playback.mediaId == shownTrack.contentUri) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = "Play or pause", modifier = Modifier.size(38.dp))
                     }
                     IconButton(onClick = onNext) { Icon(Icons.Default.SkipNext, contentDescription = "Next", modifier = Modifier.size(34.dp)) }
-                    IconButton(onClick = {}) { Icon(Icons.Default.MoreVert, contentDescription = "More playback options") }
                 }
             }
             item { SectionTitle("Made for this moment", "Generated from your archive") }
@@ -325,23 +340,56 @@ private fun PlayerScreen(
 private fun PlayerArtwork(track: TrackEntity) {
     val hue = (track.title.hashCode().toUInt().toLong() % 3).toInt()
     val secondary = listOf(Color(0xFF5A2412), Color(0xFF3B203E), Color(0xFF432A16))[hue]
+    val artwork by embeddedArtwork(track.contentUri)
+    val shape = RoundedCornerShape(28.dp)
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(1f)
-            .background(Brush.linearGradient(listOf(Color(0xFFFF6B1A), secondary, Color(0xFF090909))), RoundedCornerShape(28.dp))
-            .padding(24.dp),
+            .clip(shape)
+            .background(Brush.linearGradient(listOf(Color(0xFFFF6B1A), secondary, Color(0xFF090909)))),
     ) {
-        Text("MUSE ARCHIVE", style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = .72f))
-        Text(
-            track.title.ifBlank { "UNKNOWN TRACK" }.uppercase(Locale.US),
-            modifier = Modifier.align(Alignment.BottomStart),
-            style = MaterialTheme.typography.displaySmall,
-            fontWeight = FontWeight.Black,
-            color = Color.White,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
-        )
+        artwork?.let {
+            Image(
+                bitmap = it,
+                contentDescription = "Artwork for ${track.title}",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        } ?: Column(
+            modifier = Modifier.fillMaxSize().padding(24.dp),
+            verticalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text("MUSE ARCHIVE", style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = .72f))
+            Text(
+                track.title.ifBlank { "UNKNOWN TRACK" }.uppercase(Locale.US),
+                style = MaterialTheme.typography.displaySmall,
+                fontWeight = FontWeight.Black,
+                color = Color.White,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun embeddedArtwork(contentUri: String): androidx.compose.runtime.State<ImageBitmap?> {
+    val context = LocalContext.current
+    return produceState<ImageBitmap?>(initialValue = null, contentUri) {
+        value = withContext(Dispatchers.IO) {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(context, Uri.parse(contentUri))
+                retriever.embeddedPicture?.let { bytes ->
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                }
+            } catch (_: Exception) {
+                null
+            } finally {
+                runCatching { retriever.release() }
+            }
+        }
     }
 }
 
@@ -361,13 +409,43 @@ private fun EmptyLibrary(onScan: () -> Unit, isScanning: Boolean) {
 }
 
 @Composable
-private fun LibraryScreen(tracks: List<TrackEntity>, onPlay: (TrackEntity) -> Unit, modifier: Modifier = Modifier) {
+private fun LibraryScreen(
+    tracks: List<TrackEntity>,
+    onPlayQueue: (List<TrackEntity>, Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val playableTracks = remember(tracks) {
+        tracks.filter {
+            it.durationMs > 0 &&
+                it.status != ArchiveStatus.CORRUPTED &&
+                it.status != ArchiveStatus.TRASH_SUGGESTED
+        }
+    }
     var query by remember { mutableStateOf("") }
     var mode by remember { mutableStateOf(LibraryMode.ARTISTS) }
-    val filtered = remember(tracks, query) {
-        tracks.filter { query.isBlank() || listOf(it.title, it.artist, it.album, it.genre).any { field -> field.contains(query, true) } }
+    var openCollection by remember { mutableStateOf<Pair<String, List<TrackEntity>>?>(null) }
+    val filtered = remember(playableTracks, query) {
+        playableTracks.filter { query.isBlank() || listOf(it.title, it.artist, it.album, it.genre).any { field -> field.contains(query, true) } }
     }
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        openCollection?.let { (name, collectionTracks) ->
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { openCollection = null }) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back to library")
+                    }
+                    Column {
+                        Text("COLLECTION", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
+                        Text(name, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+                        Text("${collectionTracks.size} tracks", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+            itemsIndexed(collectionTracks, key = { _, track -> track.contentUri }) { index, track ->
+                TrackRow(track) { onPlayQueue(collectionTracks, index) }
+            }
+            return@LazyColumn
+        }
         item { AppHeader("Your archive", "Library") }
         item {
             OutlinedTextField(
@@ -389,23 +467,31 @@ private fun LibraryScreen(tracks: List<TrackEntity>, onPlay: (TrackEntity) -> Un
             }
         }
         when (mode) {
-            LibraryMode.SONGS -> items(filtered, key = TrackEntity::contentUri) { TrackRow(it, onPlay) }
+            LibraryMode.SONGS -> itemsIndexed(filtered, key = { _, track -> track.contentUri }) { index, track ->
+                TrackRow(track) { onPlayQueue(filtered, index) }
+            }
             LibraryMode.ARTISTS -> {
                 val artists = filtered.groupBy { it.artist.ifBlank { "Unknown artist" } }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
                 items(artists.entries.toList(), key = { it.key }) { (artist, artistTracks) ->
-                    CollectionRow(artist, "${artistTracks.size} tracks", Icons.Default.Headphones) { onPlay(artistTracks.first()) }
+                    CollectionRow(artist, "${artistTracks.size} tracks", Icons.Default.Headphones) {
+                        openCollection = artist to artistTracks
+                    }
                 }
             }
             LibraryMode.ALBUMS -> {
                 val albums = filtered.groupBy { it.album.ifBlank { "Unknown album" } }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
                 items(albums.entries.toList(), key = { it.key }) { (album, albumTracks) ->
-                    CollectionRow(album, "${albumTracks.firstOrNull()?.artist.orEmpty()} · ${albumTracks.size} tracks", Icons.Default.Album) { onPlay(albumTracks.first()) }
+                    CollectionRow(album, "${albumTracks.firstOrNull()?.artist.orEmpty()} · ${albumTracks.size} tracks", Icons.Default.Album) {
+                        openCollection = album to albumTracks
+                    }
                 }
             }
             LibraryMode.GENRES -> {
                 val genres = filtered.groupBy { it.genre.ifBlank { "Unclassified" } }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
                 items(genres.entries.toList(), key = { it.key }) { (genre, genreTracks) ->
-                    CollectionRow(genre, "${genreTracks.size} tracks", Icons.Default.MusicNote) { onPlay(genreTracks.first()) }
+                    CollectionRow(genre, "${genreTracks.size} tracks", Icons.Default.MusicNote) {
+                        openCollection = genre to genreTracks
+                    }
                 }
             }
         }
@@ -423,7 +509,7 @@ private fun CollectionRow(title: String, subtitle: String, icon: ImageVector, on
                 Text(title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Icon(Icons.Default.PlayArrow, contentDescription = "Play")
+            Icon(Icons.Default.KeyboardArrowRight, contentDescription = "Open collection")
         }
     }
 }
@@ -445,7 +531,7 @@ private fun TrackRow(track: TrackEntity, onPlay: (TrackEntity) -> Unit) {
 @Composable
 private fun PlaylistsScreen(
     mixes: List<GeneratedPlaylist>,
-    currentTrack: TrackEntity?,
+    moodTrack: TrackEntity?,
     onPlay: (List<TrackEntity>) -> Unit,
     onToggleMood: (TrackEntity, String) -> Unit,
     modifier: Modifier = Modifier,
@@ -471,7 +557,15 @@ private fun PlaylistsScreen(
                 }
             }
         }
-        currentTrack?.let { track -> item { MoodTeacher(track, onToggle = { onToggleMood(track, it) }) } }
+        moodTrack?.let { track ->
+            item {
+                SectionTitle(
+                    if (track.moods.isEmpty()) "Classify your untagged music" else "Refine this track",
+                    "${track.title.ifBlank { track.displayName }} · Your choices update the mixes immediately",
+                )
+            }
+            item { MoodTeacher(track, onToggle = { onToggleMood(track, it) }) }
+        }
     }
 }
 
@@ -544,6 +638,13 @@ private fun ImportTrackCard(track: TrackEntity, onEdit: (TrackEntity) -> Unit, o
                 Text("${track.healthScore}%", color = scoreColor(track.healthScore), fontWeight = FontWeight.Bold)
             }
             if (track.originalTitle.isNotBlank()) Text("Original-script alias preserved for matching", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (track.issues.isNotEmpty()) {
+                Text(
+                    track.issues.take(4).joinToString(" · ") { it.replace('_', ' ').lowercase().replaceFirstChar(Char::uppercase) },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .45f))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 FilledTonalButton(onClick = { onEdit(track) }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.AutoAwesome, null); Spacer(Modifier.width(5.dp)); Text("Identify") }

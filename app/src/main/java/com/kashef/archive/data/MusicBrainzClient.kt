@@ -62,7 +62,7 @@ class MusicBrainzClient {
                 connection.connectTimeout = 12_000
                 connection.readTimeout = 15_000
                 connection.setRequestProperty("Accept", "application/json")
-                connection.setRequestProperty("User-Agent", "Muse/0.4.0 (https://github.com/ikashef2/Muse)")
+                connection.setRequestProperty("User-Agent", "Muse/0.4.1 (https://github.com/ikashef2/Muse)")
                 try {
                     if (connection.responseCode !in 200..299) {
                         throw IllegalStateException("MusicBrainz returned HTTP ${connection.responseCode}")

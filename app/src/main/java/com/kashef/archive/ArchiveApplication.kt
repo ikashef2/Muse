@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.room.Room
 import com.kashef.archive.data.ArchiveDatabase
 import com.kashef.archive.data.AcoustIdClient
+import com.kashef.archive.data.AppleCatalogClient
 import com.kashef.archive.data.ChromaprintEngine
 import com.kashef.archive.data.MusicRepository
 import com.kashef.archive.data.MusicBrainzClient
@@ -26,6 +27,7 @@ class ArchiveApplication : Application() {
             dao = database.trackDao(),
             evaluator = MetadataQualityEvaluator(),
             musicBrainz = MusicBrainzClient(),
+            appleCatalog = AppleCatalogClient(),
             acoustId = AcoustIdClient(BuildConfig.ACOUSTID_CLIENT_KEY),
             fingerprintEngine = ChromaprintEngine(this),
             tagWriter = MetadataTagWriter(this),

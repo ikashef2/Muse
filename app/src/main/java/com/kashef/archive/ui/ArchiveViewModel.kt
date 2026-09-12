@@ -14,7 +14,7 @@ import com.kashef.archive.data.MusicScanWorker
 import com.kashef.archive.data.MetadataCandidate
 import com.kashef.archive.data.ScanReport
 import com.kashef.archive.data.TrackEntity
-import com.kashef.archive.data.PreparedTagWrite
+import com.kashef.archive.data.PreparedMetadataChange
 import com.kashef.archive.domain.MoodClassifier
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -50,8 +50,8 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
     private val report = MutableStateFlow<ScanReport?>(null)
     private val error = MutableStateFlow<String?>(null)
     private val metadataSearch = MutableStateFlow(MetadataSearchState())
-    private val mutablePendingTagWrite = MutableStateFlow<PreparedTagWrite?>(null)
-    val pendingTagWrite: StateFlow<PreparedTagWrite?> = mutablePendingTagWrite
+    private val mutablePendingMetadataChange = MutableStateFlow<PreparedMetadataChange?>(null)
+    val pendingMetadataChange: StateFlow<PreparedMetadataChange?> = mutablePendingMetadataChange
     val playback = (application as ArchiveApplication).playback
 
     val state: StateFlow<ArchiveUiState> = combine(
@@ -75,7 +75,9 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun save(track: TrackEntity) = viewModelScope.launch { repository.edit(track) }
+    fun save(original: TrackEntity, updated: TrackEntity) = stageMetadataChange {
+        repository.prepareMetadataEdit(original, updated)
+    }
     fun verify(track: TrackEntity) = viewModelScope.launch { repository.verify(track.contentUri) }
     fun suggestTrash(track: TrackEntity) = viewModelScope.launch { repository.suggestTrash(track.contentUri) }
     fun toggleMood(track: TrackEntity, mood: String) = viewModelScope.launch {
@@ -83,13 +85,22 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun playTrack(track: TrackEntity) {
+        if (!track.isPlayable()) return
         val queue = state.value.tracks.filter {
-            it.status != ArchiveStatus.CORRUPTED && it.status != ArchiveStatus.TRASH_SUGGESTED
+            it.isPlayable()
         }
         playback.playQueue(queue, queue.indexOfFirst { it.contentUri == track.contentUri }.coerceAtLeast(0))
     }
 
-    fun playQueue(tracks: List<TrackEntity>) = playback.playQueue(tracks)
+    fun playQueue(tracks: List<TrackEntity>, startIndex: Int = 0) {
+        val requested = tracks.getOrNull(startIndex)
+        val playable = tracks.filter(TrackEntity::isPlayable)
+        val playableIndex = requested
+            ?.let { target -> playable.indexOfFirst { it.contentUri == target.contentUri } }
+            ?.takeIf { it >= 0 }
+            ?: 0
+        playback.playQueue(playable, playableIndex)
+    }
 
     fun searchMetadata(track: TrackEntity) {
         if (metadataSearch.value.isSearching) return
@@ -114,28 +125,37 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
 
     fun applyMetadata(track: TrackEntity, candidate: MetadataCandidate) = viewModelScope.launch {
         metadataSearch.value = MetadataSearchState()
-        runCatching { repository.applyMetadataCandidate(track, candidate) }
-            .onSuccess { mutablePendingTagWrite.value = it }
+        runCatching { repository.prepareMetadataCandidate(track, candidate) }
+            .onSuccess { mutablePendingMetadataChange.value = it }
             .onFailure { error.value = it.message ?: "Muse could not prepare the tag rewrite." }
     }
 
-    fun commitPendingTagWrite() {
-        val pending = mutablePendingTagWrite.value ?: return
-        mutablePendingTagWrite.value = null
+    fun commitPendingMetadataChange() {
+        val pending = mutablePendingMetadataChange.value ?: return
+        mutablePendingMetadataChange.value = null
         viewModelScope.launch {
-            runCatching { repository.commitTagWrite(pending) }
+            runCatching { repository.commitMetadataChange(pending) }
                 .onSuccess { scan() }
                 .onFailure { error.value = it.message ?: "The tag rewrite failed." }
         }
     }
 
-    fun cancelPendingTagWrite() {
-        mutablePendingTagWrite.value?.let(repository::cancelTagWrite)
-        mutablePendingTagWrite.value = null
+    fun cancelPendingMetadataChange() {
+        mutablePendingMetadataChange.value?.let(repository::cancelMetadataChange)
+        mutablePendingMetadataChange.value = null
     }
 
     fun clearMetadataSearch() {
         metadataSearch.value = MetadataSearchState()
+    }
+
+    private fun stageMetadataChange(block: suspend () -> PreparedMetadataChange) {
+        viewModelScope.launch {
+            error.value = null
+            runCatching { block() }
+                .onSuccess { mutablePendingMetadataChange.value = it }
+                .onFailure { error.value = it.message ?: "Muse could not prepare the metadata change." }
+        }
     }
 
     private fun scheduleLibraryWatch() {
@@ -150,3 +170,6 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
             .enqueueUniquePeriodicWork("archive-library-watch", ExistingPeriodicWorkPolicy.UPDATE, request)
     }
 }
+
+private fun TrackEntity.isPlayable(): Boolean =
+    durationMs > 0 && status != ArchiveStatus.CORRUPTED && status != ArchiveStatus.TRASH_SUGGESTED
