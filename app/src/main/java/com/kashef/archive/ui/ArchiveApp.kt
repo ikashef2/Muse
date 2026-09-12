@@ -3,10 +3,12 @@ package com.kashef.archive.ui
 import android.Manifest
 import android.app.Activity
 import android.graphics.BitmapFactory
+import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.util.LruCache
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -105,6 +107,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.kashef.archive.data.ArchiveStatus
 import com.kashef.archive.data.MetadataCandidate
+import com.kashef.archive.data.IdentificationPhase
 import com.kashef.archive.data.TrackEntity
 import com.kashef.archive.domain.GeneratedPlaylist
 import com.kashef.archive.domain.PlaylistGenerator
@@ -230,6 +233,7 @@ fun ArchiveApp(viewModel: ArchiveViewModel = viewModel()) {
             initial = track,
             searchState = state.metadataSearch,
             onSearch = { viewModel.searchMetadata(track) },
+            onCancelSearch = viewModel::cancelMetadataSearch,
             onApply = {
                 viewModel.applyMetadata(track, it)
                 editorTrack = null
@@ -378,19 +382,50 @@ private fun embeddedArtwork(contentUri: String): androidx.compose.runtime.State<
     val context = LocalContext.current
     return produceState<ImageBitmap?>(initialValue = null, contentUri) {
         value = withContext(Dispatchers.IO) {
-            val retriever = MediaMetadataRetriever()
-            try {
-                retriever.setDataSource(context, Uri.parse(contentUri))
-                retriever.embeddedPicture?.let { bytes ->
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+            ArtworkMemoryCache.get(contentUri)?.asImageBitmap() ?: run {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(context, Uri.parse(contentUri))
+                    retriever.embeddedPicture?.let { bytes ->
+                        decodeSampledArtwork(bytes)?.also { ArtworkMemoryCache.put(contentUri, it) }?.asImageBitmap()
+                    }
+                } catch (_: Exception) {
+                    null
+                } finally {
+                    runCatching { retriever.release() }
                 }
-            } catch (_: Exception) {
-                null
-            } finally {
-                runCatching { retriever.release() }
             }
         }
     }
+}
+
+private object ArtworkMemoryCache {
+    private val cache = object : LruCache<String, Bitmap>(
+        (Runtime.getRuntime().maxMemory() / 1024L / 16L).coerceAtMost(24L * 1024L).toInt()
+    ) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount / 1024
+    }
+
+    fun get(key: String): Bitmap? = cache.get(key)
+    fun put(key: String, bitmap: Bitmap) = cache.put(key, bitmap)
+}
+
+private fun decodeSampledArtwork(bytes: ByteArray, maxEdgePx: Int = 1024): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    var sampleSize = 1
+    while (bounds.outWidth / sampleSize > maxEdgePx || bounds.outHeight / sampleSize > maxEdgePx) {
+        sampleSize *= 2
+    }
+    return BitmapFactory.decodeByteArray(
+        bytes,
+        0,
+        bytes.size,
+        BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        },
+    )
 }
 
 @Composable
@@ -715,6 +750,7 @@ private fun MetadataEditor(
     initial: TrackEntity,
     searchState: MetadataSearchState,
     onSearch: () -> Unit,
+    onCancelSearch: () -> Unit,
     onApply: (MetadataCandidate) -> Unit,
     onDismiss: () -> Unit,
     onSave: (TrackEntity) -> Unit,
@@ -737,9 +773,14 @@ private fun MetadataEditor(
                     Text("Original: ${listOf(initial.originalTitle, initial.originalArtist).filter(String::isNotBlank).joinToString(" · ")}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 item {
-                    Button(onClick = onSearch, enabled = !searchState.isSearching, modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = if (searchState.isSearching) onCancelSearch else onSearch,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
                         if (searchState.isSearching) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Fingerprint, contentDescription = null)
-                        Spacer(Modifier.width(8.dp)); Text(if (searchState.isSearching) "Fingerprinting and searching…" else "Identify from audio")
+                        Spacer(Modifier.width(8.dp)); Text(
+                            if (searchState.isSearching) "${searchState.phase.label()} · Tap to cancel" else "Identify from audio"
+                        )
                     }
                 }
                 if (searchState.trackUri == initial.contentUri) {
@@ -758,6 +799,14 @@ private fun MetadataEditor(
         confirmButton = { Button(onClick = { onSave(initial.copy(title = title, artist = artist, albumArtist = albumArtist, album = album, genre = genre)) }) { Text("Save canonical record") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+private fun IdentificationPhase?.label(): String = when (this) {
+    IdentificationPhase.READING_TAGS -> "Reading this file"
+    IdentificationPhase.FINGERPRINTING -> "Listening for up to 60 seconds"
+    IdentificationPhase.ACOUSTID -> "Matching the fingerprint"
+    IdentificationPhase.CATALOGS -> "Searching music catalogs"
+    null -> "Preparing"
 }
 
 @Composable

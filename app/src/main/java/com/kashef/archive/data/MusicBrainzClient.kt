@@ -28,11 +28,14 @@ class MusicBrainzClient {
             recordingQuery(filename, ""),
         ).filter(String::isNotBlank).distinct().take(3)
 
-        queries.flatMap { query ->
+        val matches = mutableListOf<MetadataCandidate>()
+        for (query in queries) {
             val encoded = URLEncoder.encode(query, StandardCharsets.UTF_8.name())
             val json = requestJson("https://musicbrainz.org/ws/2/recording/?query=$encoded&fmt=json&limit=8")
-            parse(json, track.durationMs)
+            matches += parse(json, track.durationMs)
+            if (matches.maxOfOrNull(MetadataCandidate::confidence) ?: 0 >= 82) break
         }
+        matches
             .distinctBy { it.recordingId }
             .sortedByDescending(MetadataCandidate::confidence)
             .take(8)
@@ -62,7 +65,7 @@ class MusicBrainzClient {
                 connection.connectTimeout = 12_000
                 connection.readTimeout = 15_000
                 connection.setRequestProperty("Accept", "application/json")
-                connection.setRequestProperty("User-Agent", "Muse/0.4.1 (https://github.com/ikashef2/Muse)")
+                connection.setRequestProperty("User-Agent", "Muse/0.4.2 (https://github.com/ikashef2/Muse)")
                 try {
                     if (connection.responseCode !in 200..299) {
                         throw IllegalStateException("MusicBrainz returned HTTP ${connection.responseCode}")

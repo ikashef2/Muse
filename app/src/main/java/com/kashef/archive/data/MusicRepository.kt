@@ -10,10 +10,20 @@ import com.kashef.archive.domain.MetadataSnapshot
 import com.kashef.archive.domain.LatinMetadataNormalizer
 import com.kashef.archive.domain.MoodClassifier
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 
 data class ScanReport(val found: Int, val addedOrUpdated: Int)
+
+enum class IdentificationPhase {
+    READING_TAGS,
+    FINGERPRINTING,
+    ACOUSTID,
+    CATALOGS,
+}
 
 data class PreparedMetadataChange(
     val original: TrackEntity,
@@ -43,7 +53,7 @@ class MusicRepository(
         } else {
             MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
         }
-        val projection = arrayOf(
+        val projection = mutableListOf(
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.DISPLAY_NAME,
             MediaStore.Audio.Media.TITLE,
@@ -57,10 +67,15 @@ class MusicRepository(
             MediaStore.Audio.Media.DATE_MODIFIED,
             MediaStore.Audio.Media.IS_MUSIC,
         )
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            projection += MediaStore.Audio.AudioColumns.ALBUM_ARTIST
+            projection += MediaStore.Audio.AudioColumns.GENRE
+            projection += MediaStore.MediaColumns.BITRATE
+        }
 
         context.contentResolver.query(
             collection,
-            projection,
+            projection.toTypedArray(),
             "${MediaStore.Audio.Media.IS_MUSIC} != 0",
             null,
             null,
@@ -76,6 +91,9 @@ class MusicRepository(
             val sizeIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE)
             val mimeIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.MIME_TYPE)
             val modifiedIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_MODIFIED)
+            val albumArtistIndex = cursor.getColumnIndex(MediaStore.Audio.AudioColumns.ALBUM_ARTIST)
+            val genreIndex = cursor.getColumnIndex(MediaStore.Audio.AudioColumns.GENRE)
+            val bitrateIndex = cursor.getColumnIndex(MediaStore.MediaColumns.BITRATE)
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idIndex)
@@ -87,31 +105,33 @@ class MusicRepository(
                     continue
                 }
 
-                val embedded = extractEmbedded(uri)
                 val displayName = cursor.getString(nameIndex).orEmpty()
-                val rawTitle = embedded.title.ifBlank { cursor.getString(titleIndex).orEmpty() }
-                val rawArtist = embedded.artist.ifBlank { cursor.getString(artistIndex).orEmpty() }
-                val rawAlbumArtist = embedded.albumArtist
-                val rawAlbum = embedded.album.ifBlank { cursor.getString(albumIndex).orEmpty() }
+                val rawTitle = cursor.getString(titleIndex).orEmpty()
+                val rawArtist = cursor.getString(artistIndex).orEmpty()
+                val rawAlbumArtist = cursor.getStringOrEmpty(albumArtistIndex)
+                val rawAlbum = cursor.getString(albumIndex).orEmpty()
+                val rawGenre = cursor.getStringOrEmpty(genreIndex)
                 val title = LatinMetadataNormalizer.canonicalize(rawTitle).latin
                 val artist = LatinMetadataNormalizer.canonicalize(rawArtist).latin
                 val albumArtist = LatinMetadataNormalizer.canonicalize(rawAlbumArtist).latin
                 val album = LatinMetadataNormalizer.canonicalize(rawAlbum).latin
-                val year = embedded.year ?: cursor.getIntOrNull(yearIndex)
-                val trackNumber = embedded.trackNumber ?: cursor.getIntOrNull(trackIndex)?.let { it % 1000 }
+                val year = cursor.getIntOrNull(yearIndex)
+                val trackNumber = cursor.getIntOrNull(trackIndex)?.let { it % 1000 }
                 val duration = cursor.getLong(durationIndex)
+                val bitrate = cursor.getIntOrNull(bitrateIndex) ?: prior?.bitrate
+                val hasArtwork = prior?.hasArtwork ?: false
                 val snapshot = MetadataSnapshot(
                     displayName = displayName,
                     title = title,
                     artist = artist,
                     albumArtist = albumArtist,
                     album = album,
-                    genre = embedded.genre,
+                    genre = rawGenre,
                     year = year,
                     trackNumber = trackNumber,
                     durationMs = duration,
-                    bitrate = embedded.bitrate,
-                    hasArtwork = embedded.hasArtwork,
+                    bitrate = bitrate,
+                    hasArtwork = hasArtwork,
                 )
                 val quality = evaluator.evaluate(snapshot)
                 val status = when {
@@ -129,15 +149,15 @@ class MusicRepository(
                     artist = artist,
                     albumArtist = albumArtist,
                     album = album,
-                    genre = embedded.genre,
+                    genre = rawGenre,
                     year = year,
                     trackNumber = trackNumber,
-                    discNumber = embedded.discNumber,
+                    discNumber = prior?.discNumber,
                     durationMs = duration,
                     sizeBytes = cursor.getLong(sizeIndex),
                     mimeType = cursor.getString(mimeIndex).orEmpty(),
-                    bitrate = embedded.bitrate,
-                    hasArtwork = embedded.hasArtwork,
+                    bitrate = bitrate,
+                    hasArtwork = hasArtwork,
                     dateModifiedSeconds = modified,
                     healthScore = quality.score,
                     issueCodes = quality.issues.joinToString("|") { it.name },
@@ -146,7 +166,7 @@ class MusicRepository(
                     originalArtist = rawArtist.takeIf { it != artist }.orEmpty(),
                     originalAlbumArtist = rawAlbumArtist.takeIf { it != albumArtist }.orEmpty(),
                     originalAlbum = rawAlbum.takeIf { it != album }.orEmpty(),
-                    inferredMoodTags = MoodClassifier.infer(title, album, embedded.genre).joinToString("|"),
+                    inferredMoodTags = MoodClassifier.infer(title, album, rawGenre).joinToString("|"),
                 )
                 val enriched = prior?.let {
                     discovered.copy(
@@ -225,43 +245,134 @@ class MusicRepository(
     suspend fun suggestTrash(uri: String) = dao.suggestTrash(uri)
     suspend fun setManualMoodTags(uri: String, tags: String) = dao.updateManualMoodTags(uri, tags)
 
-    suspend fun searchMetadata(track: TrackEntity): List<MetadataCandidate> {
-        if (!acoustId.isConfigured) return searchCatalogs(track)
+    suspend fun searchMetadata(
+        track: TrackEntity,
+        onPhase: (IdentificationPhase) -> Unit = {},
+    ): List<MetadataCandidate> {
+        onPhase(IdentificationPhase.READING_TAGS)
+        val inspected = inspectTrack(track)
+        if (!acoustId.isConfigured) {
+            onPhase(IdentificationPhase.CATALOGS)
+            return searchCatalogs(inspected)
+        }
+        onPhase(IdentificationPhase.FINGERPRINTING)
         val fingerprint = runCatching {
-            track.fingerprint.takeIf(String::isNotBlank)?.let {
-                AudioFingerprint(it, (track.durationMs / 1_000L).toInt())
-            } ?: fingerprintEngine.fingerprint(Uri.parse(track.contentUri))
-        }.getOrElse { return searchCatalogs(track) }
+            inspected.fingerprint.takeIf(String::isNotBlank)?.let {
+                AudioFingerprint(it, (inspected.durationMs / 1_000L).toInt())
+            } ?: fingerprintEngine.fingerprint(Uri.parse(inspected.contentUri))
+        }.getOrElse { error ->
+            if (error is CancellationException) throw error
+            onPhase(IdentificationPhase.CATALOGS)
+            return searchCatalogs(inspected)
+        }
 
-        val bestMatch = runCatching { acoustId.lookup(fingerprint, track.durationMs).firstOrNull() }.getOrNull()
-        if (bestMatch == null) return searchCatalogs(track)
-        val candidates = runCatching {
+        onPhase(IdentificationPhase.ACOUSTID)
+        val bestMatch = try {
+            acoustId.lookup(fingerprint, inspected.durationMs).firstOrNull()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            null
+        }
+        if (bestMatch == null) {
+            onPhase(IdentificationPhase.CATALOGS)
+            return searchCatalogs(inspected)
+        }
+        val candidates = try {
             musicBrainz.lookupByRecordingIds(
                 recordingIds = bestMatch.recordingIds,
-                localDurationMs = track.durationMs,
+                localDurationMs = inspected.durationMs,
                 acoustId = bestMatch.acoustId,
                 acoustConfidence = bestMatch.score,
             )
-        }.getOrDefault(emptyList())
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            emptyList()
+        }
         val top = candidates.firstOrNull()
         dao.updateIdentification(
-            uri = track.contentUri,
+            uri = inspected.contentUri,
             fingerprint = fingerprint.encoded,
             acoustId = bestMatch.acoustId,
             recordingId = top?.recordingId.orEmpty(),
             confidence = top?.confidence ?: bestMatch.score,
             source = "ACOUSTID_FINGERPRINT",
         )
-        return candidates.ifEmpty { searchCatalogs(track) }
+        if (candidates.isNotEmpty()) return candidates
+        onPhase(IdentificationPhase.CATALOGS)
+        return searchCatalogs(inspected)
     }
 
-    private suspend fun searchCatalogs(track: TrackEntity): List<MetadataCandidate> {
-        val musicBrainzMatches = runCatching { musicBrainz.search(track) }.getOrDefault(emptyList())
-        val appleMatches = runCatching { appleCatalog.search(track) }.getOrDefault(emptyList())
-        return (musicBrainzMatches + appleMatches)
+    private suspend fun searchCatalogs(track: TrackEntity): List<MetadataCandidate> = coroutineScope {
+        val musicBrainzJob = async {
+            try {
+                musicBrainz.search(track)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+        val appleJob = async {
+            try {
+                appleCatalog.search(track)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+        val musicBrainzMatches = musicBrainzJob.await()
+        val appleMatches = appleJob.await()
+        (musicBrainzMatches + appleMatches)
             .distinctBy { "${it.title.lowercase()}|${it.artist.lowercase()}|${it.album.lowercase()}" }
             .sortedByDescending(MetadataCandidate::confidence)
             .take(10)
+    }
+
+    /** Performs the expensive container inspection only for the song being reviewed. */
+    private suspend fun inspectTrack(track: TrackEntity): TrackEntity = withContext(Dispatchers.IO) {
+        val embedded = extractEmbedded(Uri.parse(track.contentUri))
+        val rawTitle = embedded.title.ifBlank { track.title }
+        val rawArtist = embedded.artist.ifBlank { track.artist }
+        val rawAlbumArtist = embedded.albumArtist.ifBlank { track.albumArtist }
+        val rawAlbum = embedded.album.ifBlank { track.album }
+        val title = LatinMetadataNormalizer.canonicalize(rawTitle).latin
+        val artist = LatinMetadataNormalizer.canonicalize(rawArtist).latin
+        val albumArtist = LatinMetadataNormalizer.canonicalize(rawAlbumArtist).latin
+        val album = LatinMetadataNormalizer.canonicalize(rawAlbum).latin
+        val inspected = if (track.isUserEdited) {
+            track.copy(
+                bitrate = embedded.bitrate ?: track.bitrate,
+                hasArtwork = embedded.hasArtwork,
+            )
+        } else {
+            track.copy(
+                title = title,
+                artist = artist,
+                albumArtist = albumArtist,
+                album = album,
+                genre = embedded.genre.ifBlank { track.genre },
+                year = embedded.year ?: track.year,
+                trackNumber = embedded.trackNumber ?: track.trackNumber,
+                discNumber = embedded.discNumber ?: track.discNumber,
+                bitrate = embedded.bitrate ?: track.bitrate,
+                hasArtwork = embedded.hasArtwork,
+                originalTitle = rawTitle.takeIf { it != title }.orEmpty().ifBlank { track.originalTitle },
+                originalArtist = rawArtist.takeIf { it != artist }.orEmpty().ifBlank { track.originalArtist },
+                originalAlbumArtist = rawAlbumArtist.takeIf { it != albumArtist }.orEmpty().ifBlank { track.originalAlbumArtist },
+                originalAlbum = rawAlbum.takeIf { it != album }.orEmpty().ifBlank { track.originalAlbum },
+            )
+        }
+        val quality = evaluator.evaluate(inspected.toMetadataSnapshot())
+        val updated = inspected.copy(
+            healthScore = quality.score,
+            issueCodes = quality.issues.joinToString("|") { it.name },
+            inferredMoodTags = MoodClassifier.infer(inspected.title, inspected.album, inspected.genre).joinToString("|"),
+        )
+        dao.upsertAll(listOf(updated))
+        updated
     }
 
     suspend fun prepareMetadataCandidate(track: TrackEntity, candidate: MetadataCandidate): PreparedMetadataChange {
@@ -358,8 +469,24 @@ class MusicRepository(
 
     private fun MediaMetadataRetriever.text(key: Int): String = extractMetadata(key).orEmpty().trim()
     private fun android.database.Cursor.getIntOrNull(index: Int): Int? =
-        if (isNull(index)) null else getInt(index).takeIf { it != 0 }
+        if (index < 0 || isNull(index)) null else getInt(index).takeIf { it != 0 }
+    private fun android.database.Cursor.getStringOrEmpty(index: Int): String =
+        if (index < 0 || isNull(index)) "" else getString(index).orEmpty()
 }
+
+private fun TrackEntity.toMetadataSnapshot() = MetadataSnapshot(
+    displayName = displayName,
+    title = title,
+    artist = artist,
+    albumArtist = albumArtist,
+    album = album,
+    genre = genre,
+    year = year,
+    trackNumber = trackNumber,
+    durationMs = durationMs,
+    bitrate = bitrate,
+    hasArtwork = hasArtwork,
+)
 
 private data class EmbeddedMetadata(
     val title: String = "",
