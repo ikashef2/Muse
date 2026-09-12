@@ -10,7 +10,7 @@ class ArchiveConverters {
     @TypeConverter fun stringToStatus(value: String): ArchiveStatus = ArchiveStatus.valueOf(value)
 }
 
-@Database(entities = [TrackEntity::class], version = 1, exportSchema = false)
+@Database(entities = [TrackEntity::class], version = 2, exportSchema = false)
 @TypeConverters(ArchiveConverters::class)
 abstract class ArchiveDatabase : RoomDatabase() {
     abstract fun trackDao(): TrackDao

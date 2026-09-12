@@ -33,15 +33,11 @@ class PlaylistGenerator {
 
     private fun score(track: TrackEntity, mood: PlaylistMood): Int {
         if (mood == PlaylistMood.DISCOVERY) return track.healthScore / 10
-        val haystack = "${track.genre} ${track.album} ${track.title}".lowercase()
-        val keywords = when (mood) {
-            PlaylistMood.FOCUS -> listOf("ambient", "instrumental", "classical", "piano", "lofi", "lo-fi", "soundtrack")
-            PlaylistMood.ENERGY -> listOf("rock", "metal", "electronic", "dance", "techno", "house", "hip hop", "rap")
-            PlaylistMood.CALM -> listOf("acoustic", "folk", "classical", "ambient", "chill", "soft", "piano")
-            PlaylistMood.NIGHT -> listOf("jazz", "soul", "r&b", "trip hop", "dark", "blues", "downtempo")
-            PlaylistMood.DISCOVERY -> emptyList()
-        }
-        return keywords.count(haystack::contains) * 100 + track.healthScore
+        val correctedMoodMatch = mood.name in track.moods
+        val wasExplicitlyCorrected = track.manualMoodTags.split('|').any { it.removePrefix("!").equals(mood.name, true) }
+        return (if (correctedMoodMatch) 1_000 else 0) +
+            (if (correctedMoodMatch && wasExplicitlyCorrected) 1_000 else 0) +
+            track.healthScore
     }
 
     private fun stableOrder(track: TrackEntity, mood: PlaylistMood): Int =

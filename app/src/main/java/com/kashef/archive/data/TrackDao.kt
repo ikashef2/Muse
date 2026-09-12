@@ -57,4 +57,27 @@ interface TrackDao {
 
     @Query("UPDATE tracks SET status = 'TRASH_SUGGESTED' WHERE contentUri = :uri")
     suspend fun suggestTrash(uri: String)
+
+    @Query("UPDATE tracks SET manualMoodTags = :tags WHERE contentUri = :uri")
+    suspend fun updateManualMoodTags(uri: String, tags: String)
+
+    @Query(
+        """
+        UPDATE tracks SET
+            fingerprint = :fingerprint,
+            acoustId = :acoustId,
+            musicBrainzRecordingId = :recordingId,
+            matchConfidence = :confidence,
+            matchSource = :source
+        WHERE contentUri = :uri
+        """
+    )
+    suspend fun updateIdentification(
+        uri: String,
+        fingerprint: String,
+        acoustId: String,
+        recordingId: String,
+        confidence: Int?,
+        source: String,
+    )
 }

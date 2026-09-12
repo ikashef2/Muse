@@ -31,18 +31,23 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Install pinned Android native toolchain
+        run: sdkmanager "ndk;27.2.12479018" "cmake;3.22.1"
+
       - name: Run tests and build APK
+        env:
+          ACOUSTID_CLIENT_KEY: ${{ secrets.ACOUSTID_CLIENT_KEY }}
         run: gradle --no-daemon testDebugUnitTest assembleDebug
 
       - name: Prepare downloadable APK
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/Archive-debug-${{ github.run_number }}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/Muse-v0.4.0-${{ github.run_number }}.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Archive-debug-apk
+          name: Muse-v0.4.0-apk
           path: dist/*.apk
           if-no-files-found: error
           retention-days: 30
