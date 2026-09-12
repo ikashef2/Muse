@@ -32,4 +32,5 @@ FetchContent_MakeAvailable(chromaprint)
 
 add_library(musefingerprint SHARED fingerprint_jni.cpp)
 target_compile_features(musefingerprint PRIVATE cxx_std_17)
+target_include_directories(musefingerprint PRIVATE "${chromaprint_SOURCE_DIR}/src")
 target_link_libraries(musefingerprint PRIVATE chromaprint log)
