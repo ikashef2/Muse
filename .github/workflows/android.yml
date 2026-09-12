@@ -59,12 +59,12 @@ jobs:
       - name: Prepare downloadable APK
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/Muse-v0.4.0-${{ github.run_number }}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/Muse-v0.4.1-${{ github.run_number }}.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Muse-v0.4.0-apk
+          name: Muse-v0.4.1-apk
           path: dist/*.apk
           if-no-files-found: error
           retention-days: 30
