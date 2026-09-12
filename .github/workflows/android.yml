@@ -3,9 +3,11 @@ name: Android Cloud Build
 
 on:
   push:
-    branches: ['**']
+    branches:
+      - '**'
   pull_request:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -25,15 +27,29 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.9"
+          gradle-version: '8.9'
 
       - name: Install pinned Android native toolchain
-        run: "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018" "cmake;3.22.1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          sdkmanager_path="${sdk_root}/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "${sdkmanager_path}" ]]; then
+            sdkmanager_path="$(find "${sdk_root}/cmdline-tools" -type f -name sdkmanager -perm -111 2>/dev/null | head -n 1 || true)"
+          fi
+          if [[ -z "${sdkmanager_path}" || ! -x "${sdkmanager_path}" ]]; then
+            echo "Unable to locate sdkmanager under ${sdk_root}" >&2
+            find "${sdk_root}" -maxdepth 4 -type f -name sdkmanager -print >&2 || true
+            exit 1
+          fi
+          yes | "${sdkmanager_path}" --licenses >/dev/null || true
+          "${sdkmanager_path}" "ndk;27.2.12479018" "cmake;3.22.1"
 
       - name: Run tests and build APK
         env:
