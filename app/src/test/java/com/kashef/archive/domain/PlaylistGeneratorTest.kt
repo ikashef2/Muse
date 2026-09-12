@@ -7,6 +7,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlaylistGeneratorTest {
+    @Test
+    fun moodPlaylistExcludesTracksWithoutThatMood() {
+        val energy = track(uri = "energy", genre = "Electronic")
+        val calm = track(uri = "calm", genre = "Ambient")
+
+        val result = PlaylistGenerator().generate(listOf(energy, calm), PlaylistMood.ENERGY)
+
+        assertEquals(listOf("energy"), result.tracks.map { it.contentUri })
+    }
+
     private val generator = PlaylistGenerator()
 
     @Test
@@ -50,5 +60,6 @@ class PlaylistGeneratorTest {
         healthScore = 90,
         issueCodes = "",
         status = status,
+        inferredMoodTags = MoodClassifier.infer(uri, "Album", genre).joinToString("|"),
     )
 }

@@ -15,11 +15,20 @@ import kotlinx.coroutines.withContext
 
 data class ScanReport(val found: Int, val addedOrUpdated: Int)
 
+data class PreparedMetadataChange(
+    val original: TrackEntity,
+    val updated: TrackEntity,
+    val tagWrite: PreparedTagWrite?,
+) {
+    val contentUri: String get() = updated.contentUri
+}
+
 class MusicRepository(
     private val context: Context,
     private val dao: TrackDao,
     private val evaluator: MetadataQualityEvaluator,
     private val musicBrainz: MusicBrainzClient,
+    private val appleCatalog: AppleCatalogClient,
     private val acoustId: AcoustIdClient,
     private val fingerprintEngine: ChromaprintEngine,
     private val tagWriter: MetadataTagWriter,
@@ -139,8 +148,22 @@ class MusicRepository(
                     originalAlbum = rawAlbum.takeIf { it != album }.orEmpty(),
                     inferredMoodTags = MoodClassifier.infer(title, album, embedded.genre).joinToString("|"),
                 )
-                scanned += if (prior?.isUserEdited == true) {
+                val enriched = prior?.let {
                     discovered.copy(
+                        originalTitle = it.originalTitle.ifBlank { discovered.originalTitle },
+                        originalArtist = it.originalArtist.ifBlank { discovered.originalArtist },
+                        originalAlbumArtist = it.originalAlbumArtist.ifBlank { discovered.originalAlbumArtist },
+                        originalAlbum = it.originalAlbum.ifBlank { discovered.originalAlbum },
+                        manualMoodTags = it.manualMoodTags,
+                        fingerprint = it.fingerprint,
+                        acoustId = it.acoustId,
+                        musicBrainzRecordingId = it.musicBrainzRecordingId,
+                        matchConfidence = it.matchConfidence,
+                        matchSource = it.matchSource,
+                    )
+                } ?: discovered
+                scanned += if (prior?.isUserEdited == true) {
+                    enriched.copy(
                         title = prior.title,
                         artist = prior.artist,
                         albumArtist = prior.albumArtist,
@@ -155,7 +178,7 @@ class MusicRepository(
                             .joinToString("|"),
                         isUserEdited = true,
                     )
-                } else discovered
+                } else enriched
             }
         }
 
@@ -203,15 +226,15 @@ class MusicRepository(
     suspend fun setManualMoodTags(uri: String, tags: String) = dao.updateManualMoodTags(uri, tags)
 
     suspend fun searchMetadata(track: TrackEntity): List<MetadataCandidate> {
-        if (!acoustId.isConfigured) return musicBrainz.search(track)
+        if (!acoustId.isConfigured) return searchCatalogs(track)
         val fingerprint = runCatching {
             track.fingerprint.takeIf(String::isNotBlank)?.let {
                 AudioFingerprint(it, (track.durationMs / 1_000L).toInt())
             } ?: fingerprintEngine.fingerprint(Uri.parse(track.contentUri))
-        }.getOrElse { return musicBrainz.search(track) }
+        }.getOrElse { return searchCatalogs(track) }
 
         val bestMatch = runCatching { acoustId.lookup(fingerprint, track.durationMs).firstOrNull() }.getOrNull()
-        if (bestMatch == null) return musicBrainz.search(track)
+        if (bestMatch == null) return searchCatalogs(track)
         val candidates = runCatching {
             musicBrainz.lookupByRecordingIds(
                 recordingIds = bestMatch.recordingIds,
@@ -229,10 +252,19 @@ class MusicRepository(
             confidence = top?.confidence ?: bestMatch.score,
             source = "ACOUSTID_FINGERPRINT",
         )
-        return candidates.ifEmpty { musicBrainz.search(track) }
+        return candidates.ifEmpty { searchCatalogs(track) }
     }
 
-    suspend fun applyMetadataCandidate(track: TrackEntity, candidate: MetadataCandidate): PreparedTagWrite? {
+    private suspend fun searchCatalogs(track: TrackEntity): List<MetadataCandidate> {
+        val musicBrainzMatches = runCatching { musicBrainz.search(track) }.getOrDefault(emptyList())
+        val appleMatches = runCatching { appleCatalog.search(track) }.getOrDefault(emptyList())
+        return (musicBrainzMatches + appleMatches)
+            .distinctBy { "${it.title.lowercase()}|${it.artist.lowercase()}|${it.album.lowercase()}" }
+            .sortedByDescending(MetadataCandidate::confidence)
+            .take(10)
+    }
+
+    suspend fun prepareMetadataCandidate(track: TrackEntity, candidate: MetadataCandidate): PreparedMetadataChange {
         val updated = track.copy(
                 title = candidate.title,
                 artist = candidate.artist.ifBlank { track.artist },
@@ -241,16 +273,36 @@ class MusicRepository(
                 genre = candidate.genre.ifBlank { track.genre },
                 year = candidate.year ?: track.year,
                 acoustId = candidate.acoustId.ifBlank { track.acoustId },
-                musicBrainzRecordingId = candidate.recordingId,
+                musicBrainzRecordingId = candidate.recordingId.takeUnless { it.startsWith("apple:") }.orEmpty(),
                 matchConfidence = candidate.confidence,
-                matchSource = if (candidate.acoustId.isNotBlank()) "ACOUSTID_FINGERPRINT" else "MUSICBRAINZ_TEXT",
+                matchSource = when {
+                    candidate.acoustId.isNotBlank() -> "ACOUSTID_FINGERPRINT"
+                    candidate.recordingId.startsWith("apple:") -> "APPLE_CATALOG"
+                    else -> "MUSICBRAINZ_TEXT"
+                },
             )
-        edit(updated)
-        return if (tagWriter.supports(updated)) tagWriter.prepare(updated) else null
+        return prepareMetadataEdit(track, updated)
     }
 
-    suspend fun commitTagWrite(prepared: PreparedTagWrite) = tagWriter.commit(prepared)
-    fun cancelTagWrite(prepared: PreparedTagWrite) = tagWriter.cancel(prepared)
+    suspend fun prepareMetadataEdit(original: TrackEntity, updated: TrackEntity): PreparedMetadataChange {
+        val canonical = updated.copy(
+            title = LatinMetadataNormalizer.canonicalize(updated.title).latin,
+            artist = LatinMetadataNormalizer.canonicalize(updated.artist).latin,
+            albumArtist = LatinMetadataNormalizer.canonicalize(updated.albumArtist).latin,
+            album = LatinMetadataNormalizer.canonicalize(updated.album).latin,
+        )
+        val write = if (tagWriter.supports(canonical)) tagWriter.prepare(canonical) else null
+        return PreparedMetadataChange(original, canonical, write)
+    }
+
+    suspend fun commitMetadataChange(prepared: PreparedMetadataChange) {
+        prepared.tagWrite?.let { tagWriter.commit(it) }
+        edit(prepared.updated)
+    }
+
+    fun cancelMetadataChange(prepared: PreparedMetadataChange) {
+        prepared.tagWrite?.let(tagWriter::cancel)
+    }
 
     private fun markExactDuplicates(tracks: List<TrackEntity>): List<TrackEntity> {
         val duplicateUris = tracks

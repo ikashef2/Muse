@@ -19,12 +19,18 @@ data class AudioFingerprint(
 
 class ChromaprintEngine(private val context: Context) {
     companion object {
-        init { System.loadLibrary("musefingerprint") }
         private const val TIMEOUT_US = 10_000L
         private const val MAX_ANALYSIS_US = 120_000_000L
     }
 
+    private val nativeAvailable by lazy {
+        runCatching { System.loadLibrary("musefingerprint") }.isSuccess
+    }
+
     suspend fun fingerprint(uri: Uri): AudioFingerprint = withContext(Dispatchers.IO) {
+        check(nativeAvailable) {
+            "Audio fingerprinting is unavailable on this device. Muse will use catalog search instead."
+        }
         val extractor = MediaExtractor()
         var decoder: MediaCodec? = null
         val handle = nativeCreate()
@@ -50,6 +56,7 @@ class ChromaprintEngine(private val context: Context) {
             var inputEnded = false
             var outputEnded = false
             var analyzedUs = 0L
+            var pcmEncoding = AudioFormat.ENCODING_PCM_16BIT
 
             while (!outputEnded && analyzedUs < MAX_ANALYSIS_US) {
                 coroutineContext.ensureActive()
@@ -69,14 +76,27 @@ class ChromaprintEngine(private val context: Context) {
                 }
 
                 val outputIndex = decoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                if (outputIndex >= 0) {
+                if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val outputFormat = decoder.outputFormat
+                    pcmEncoding = outputFormat.getIntegerOrDefault(
+                        MediaFormat.KEY_PCM_ENCODING,
+                        AudioFormat.ENCODING_PCM_16BIT,
+                    )
+                } else if (outputIndex >= 0) {
                     val outputBuffer = decoder.getOutputBuffer(outputIndex)
                     if (outputBuffer != null && bufferInfo.size >= 2) {
                         outputBuffer.position(bufferInfo.offset)
                         outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
-                        val shorts = outputBuffer.slice().order(ByteOrder.nativeOrder()).asShortBuffer()
-                        val samples = ShortArray(shorts.remaining())
-                        shorts.get(samples)
+                        val pcm = outputBuffer.slice().order(ByteOrder.nativeOrder())
+                        val samples = if (pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT) {
+                            val floats = pcm.asFloatBuffer()
+                            ShortArray(floats.remaining()) { index ->
+                                (floats.get(index).coerceIn(-1f, 1f) * Short.MAX_VALUE).toInt().toShort()
+                            }
+                        } else {
+                            val shorts = pcm.asShortBuffer()
+                            ShortArray(shorts.remaining()).also { shorts.get(it) }
+                        }
                         check(nativeFeed(handle, samples, samples.size)) { "Chromaprint rejected decoded audio." }
                     }
                     analyzedUs = maxOf(analyzedUs, bufferInfo.presentationTimeUs)
@@ -102,3 +122,6 @@ class ChromaprintEngine(private val context: Context) {
     private external fun nativeFinish(handle: Long): String?
     private external fun nativeDestroy(handle: Long)
 }
+
+private fun MediaFormat.getIntegerOrDefault(key: String, fallback: Int): Int =
+    runCatching { getInteger(key) }.getOrDefault(fallback)
