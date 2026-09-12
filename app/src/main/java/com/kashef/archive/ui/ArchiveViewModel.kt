@@ -12,6 +12,7 @@ import com.kashef.archive.ArchiveApplication
 import com.kashef.archive.data.ArchiveStatus
 import com.kashef.archive.data.MusicScanWorker
 import com.kashef.archive.data.MetadataCandidate
+import com.kashef.archive.data.IdentificationPhase
 import com.kashef.archive.data.ScanReport
 import com.kashef.archive.data.TrackEntity
 import com.kashef.archive.data.PreparedMetadataChange
@@ -22,6 +23,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import java.util.concurrent.TimeUnit
 
 data class ArchiveUiState(
@@ -40,6 +43,7 @@ data class ArchiveUiState(
 data class MetadataSearchState(
     val trackUri: String? = null,
     val isSearching: Boolean = false,
+    val phase: IdentificationPhase? = null,
     val candidates: List<MetadataCandidate> = emptyList(),
     val error: String? = null,
 )
@@ -51,6 +55,7 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
     private val error = MutableStateFlow<String?>(null)
     private val metadataSearch = MutableStateFlow(MetadataSearchState())
     private val mutablePendingMetadataChange = MutableStateFlow<PreparedMetadataChange?>(null)
+    private var metadataSearchJob: Job? = null
     val pendingMetadataChange: StateFlow<PreparedMetadataChange?> = mutablePendingMetadataChange
     val playback = (application as ArchiveApplication).playback
 
@@ -104,9 +109,17 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
 
     fun searchMetadata(track: TrackEntity) {
         if (metadataSearch.value.isSearching) return
-        viewModelScope.launch {
-            metadataSearch.value = MetadataSearchState(trackUri = track.contentUri, isSearching = true)
-            runCatching { repository.searchMetadata(track) }
+        metadataSearchJob = viewModelScope.launch {
+            metadataSearch.value = MetadataSearchState(
+                trackUri = track.contentUri,
+                isSearching = true,
+                phase = IdentificationPhase.READING_TAGS,
+            )
+            runCatching {
+                repository.searchMetadata(track) { phase ->
+                    metadataSearch.value = metadataSearch.value.copy(phase = phase)
+                }
+            }
                 .onSuccess { candidates ->
                     metadataSearch.value = MetadataSearchState(
                         trackUri = track.contentUri,
@@ -115,15 +128,24 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
                     )
                 }
                 .onFailure {
-                    metadataSearch.value = MetadataSearchState(
-                        trackUri = track.contentUri,
-                        error = it.message ?: "Metadata search failed.",
-                    )
+                    if (it !is CancellationException) {
+                        metadataSearch.value = MetadataSearchState(
+                            trackUri = track.contentUri,
+                            error = it.message ?: "Metadata search failed.",
+                        )
+                    }
                 }
         }
     }
 
+    fun cancelMetadataSearch() {
+        metadataSearchJob?.cancel()
+        metadataSearchJob = null
+        metadataSearch.value = MetadataSearchState()
+    }
+
     fun applyMetadata(track: TrackEntity, candidate: MetadataCandidate) = viewModelScope.launch {
+        metadataSearchJob = null
         metadataSearch.value = MetadataSearchState()
         runCatching { repository.prepareMetadataCandidate(track, candidate) }
             .onSuccess { mutablePendingMetadataChange.value = it }
@@ -146,6 +168,8 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun clearMetadataSearch() {
+        metadataSearchJob?.cancel()
+        metadataSearchJob = null
         metadataSearch.value = MetadataSearchState()
     }
 

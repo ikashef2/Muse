@@ -20,7 +20,9 @@ data class AudioFingerprint(
 class ChromaprintEngine(private val context: Context) {
     companion object {
         private const val TIMEOUT_US = 10_000L
-        private const val MAX_ANALYSIS_US = 120_000_000L
+        // Chromaprint does not need the whole song. A one-minute sample keeps
+        // identification reliable without decoding two minutes on the phone.
+        private const val MAX_ANALYSIS_US = 60_000_000L
     }
 
     private val nativeAvailable by lazy {

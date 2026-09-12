@@ -30,7 +30,8 @@ class AppleCatalogClient {
             filename,
         ).filter(String::isNotBlank).distinct().take(2)
 
-        terms.flatMap { term ->
+        val matches = mutableListOf<MetadataCandidate>()
+        for (term in terms) {
             val waitMs = 400L - (System.currentTimeMillis() - lastRequestAt)
             if (waitMs > 0) delay(waitMs)
             val encoded = URLEncoder.encode(term, StandardCharsets.UTF_8.name())
@@ -38,8 +39,10 @@ class AppleCatalogClient {
                 "https://itunes.apple.com/search?term=$encoded&media=music&entity=song&country=US&limit=12"
             )
             lastRequestAt = System.currentTimeMillis()
-            parse(json, track)
+            matches += parse(json, track)
+            if (matches.maxOfOrNull(MetadataCandidate::confidence) ?: 0 >= 80) break
         }
+        matches
             .distinctBy(MetadataCandidate::recordingId)
             .filter { it.confidence >= 42 }
             .sortedByDescending(MetadataCandidate::confidence)
@@ -51,7 +54,7 @@ class AppleCatalogClient {
         connection.connectTimeout = 12_000
         connection.readTimeout = 15_000
         connection.setRequestProperty("Accept", "application/json")
-        connection.setRequestProperty("User-Agent", "Muse/0.4.1 (https://github.com/ikashef2/Muse)")
+        connection.setRequestProperty("User-Agent", "Muse/0.4.2 (https://github.com/ikashef2/Muse)")
         try {
             if (connection.responseCode !in 200..299) {
                 throw IllegalStateException("Apple catalog returned HTTP ${connection.responseCode}")
