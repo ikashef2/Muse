@@ -1,5 +1,7 @@
 # Archive
 
+[![Android Cloud Build](https://github.com/ikashef2/Muse/actions/workflows/android.yml/badge.svg)](https://github.com/ikashef2/Muse/actions/workflows/android.yml)
+
 Archive is a local-first Android music curator for a deliberately clean personal library. The player is secondary: new audio is quarantined, inspected, and manually approved before it appears in the verified library.
 
 ## Prototype 0.2
