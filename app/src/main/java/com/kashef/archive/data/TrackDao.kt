@@ -14,11 +14,58 @@ interface TrackDao {
     @Query("SELECT * FROM tracks")
     suspend fun getAllOnce(): List<TrackEntity>
 
+    @Query("SELECT * FROM tracks WHERE contentUri = :uri LIMIT 1")
+    suspend fun getByUri(uri: String): TrackEntity?
+
+    @Query("SELECT * FROM tracks WHERE contentUri IN (:uris)")
+    suspend fun getByUris(uris: List<String>): List<TrackEntity>
+
+    @Query(
+        """
+        SELECT * FROM tracks
+        WHERE title LIKE '%' || :query || '%' COLLATE NOCASE
+           OR artist LIKE '%' || :query || '%' COLLATE NOCASE
+           OR album LIKE '%' || :query || '%' COLLATE NOCASE
+           OR genre LIKE '%' || :query || '%' COLLATE NOCASE
+           OR originalTitle LIKE '%' || :query || '%' COLLATE NOCASE
+           OR originalArtist LIKE '%' || :query || '%' COLLATE NOCASE
+        ORDER BY
+            CASE
+                WHEN title LIKE :query || '%' COLLATE NOCASE THEN 0
+                WHEN artist LIKE :query || '%' COLLATE NOCASE THEN 1
+                ELSE 2
+            END,
+            artist COLLATE NOCASE,
+            album COLLATE NOCASE,
+            trackNumber
+        LIMIT :limit
+        """
+    )
+    suspend fun search(query: String, limit: Int = 80): List<TrackEntity>
+
+    @Query(
+        """
+        SELECT * FROM tracks
+        WHERE durationMs > 0
+          AND status != 'CORRUPTED'
+          AND status != 'TRASH_SUGGESTED'
+        ORDER BY dateModifiedSeconds DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun recentlyAdded(limit: Int = 40): List<TrackEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(tracks: List<TrackEntity>)
 
     @Query("DELETE FROM tracks WHERE contentUri NOT IN (:activeUris)")
     suspend fun removeMissing(activeUris: List<String>)
+
+    @Query("DELETE FROM tracks WHERE contentUri IN (:uris)")
+    suspend fun deleteUris(uris: List<String>)
+
+    @Query("DELETE FROM tracks")
+    suspend fun deleteAll()
 
     @Query(
         """

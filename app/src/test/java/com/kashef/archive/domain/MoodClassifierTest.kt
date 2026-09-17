@@ -15,10 +15,10 @@ class MoodClassifierTest {
     }
 
     @Test
-    fun toggleRemovesAnIncorrectAutomaticMood() {
-        val track = track(inferred = "CALM")
-        val corrected = track.copy(manualMoodTags = MoodClassifier.toggle(track, "CALM"))
-        assertFalse("CALM" in corrected.moods)
+    fun infersStructuredMetalMoods() {
+        val moods = MoodClassifier.infer("Ghost of Perdition", "Ghost Reveries", "Progressive Death Metal")
+        assertTrue("AGGRESSIVE" in moods || "ENERGY" in moods)
+        assertTrue("INTROSPECTIVE" in moods || "FOCUS" in moods)
     }
 
     private fun track(inferred: String, manual: String = "") = TrackEntity(

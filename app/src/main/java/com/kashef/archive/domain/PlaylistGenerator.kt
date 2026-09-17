@@ -27,19 +27,35 @@ class PlaylistGenerator {
         val eligible = if (mood == PlaylistMood.DISCOVERY) {
             playable
         } else {
-            playable.filter { mood.name in it.moods }
+            playable.filter { matchesMood(it, mood) }
         }
         val ranked = eligible.sortedWith(
             compareByDescending<TrackEntity> { score(it, mood) }
-                .thenBy { stableOrder(it, mood) }
+                .thenBy { stableOrder(it, mood) },
         )
         return GeneratedPlaylist(mood, ranked.take(limit))
     }
 
+    private fun matchesMood(track: TrackEntity, mood: PlaylistMood): Boolean {
+        if (mood.name in track.moods) return true
+        return track.moods.any { it in relatedAttributes(mood) }
+    }
+
+    private fun relatedAttributes(mood: PlaylistMood): Set<String> = when (mood) {
+        PlaylistMood.FOCUS -> setOf("ATMOSPHERIC", "INTROSPECTIVE", "CALM")
+        PlaylistMood.ENERGY -> setOf("ENERGETIC", "AGGRESSIVE", "CHAOTIC", "EUPHORIC", "EPIC")
+        PlaylistMood.CALM -> setOf("CALM", "MELANCHOLIC", "ATMOSPHERIC")
+        PlaylistMood.NIGHT -> setOf("DARK", "MELANCHOLIC", "INTROSPECTIVE")
+        PlaylistMood.DISCOVERY -> emptySet()
+    }
+
     private fun score(track: TrackEntity, mood: PlaylistMood): Int {
         if (mood == PlaylistMood.DISCOVERY) return track.healthScore / 10
-        val correctedMoodMatch = mood.name in track.moods
-        val wasExplicitlyCorrected = track.manualMoodTags.split('|').any { it.removePrefix("!").equals(mood.name, true) }
+        val correctedMoodMatch = matchesMood(track, mood)
+        val wasExplicitlyCorrected = track.manualMoodTags.split('|').any {
+            val tag = it.removePrefix("!").uppercase()
+            tag == mood.name || tag in relatedAttributes(mood)
+        }
         return (if (correctedMoodMatch) 1_000 else 0) +
             (if (correctedMoodMatch && wasExplicitlyCorrected) 1_000 else 0) +
             track.healthScore

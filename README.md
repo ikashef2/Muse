@@ -1,81 +1,48 @@
-# Archive
+# Muse
 
 [![Android Cloud Build](https://github.com/ikashef2/Muse/actions/workflows/android.yml/badge.svg)](https://github.com/ikashef2/Muse/actions/workflows/android.yml)
 
-Archive is a local-first Android music curator for a deliberately clean personal library. The player is secondary: new audio is quarantined, inspected, and manually approved before it appears in the verified library.
+Muse is an intelligent personal music system for Android: a local-first library that cleans, understands, organizes, and expands your musical taste. The player is the surface — metadata quality, taste modeling, and discovery are the product.
 
-## Prototype 0.3
+## Current build: 0.5.0
 
-- Scans Android `MediaStore.Audio` without copying or uploading audio.
-- Reads embedded metadata and technical properties.
-- Calculates a deterministic metadata-health score.
-- Separates the review Inbox from the verified Library.
-- Supports canonical metadata drafts, manual verification, and trash suggestions.
-- Detects device-library changes without replacing user edits when the source file is unchanged.
-- Schedules a conservative background rescan after the first authorized scan.
-- Plays local audio through a Media3 background session with system controls.
-- Generates Focus, Energy, Calm, Night, and Discovery mixes locally.
-- Searches MusicBrainz for metadata candidates and ranks them against track duration.
-- Applies accepted matches to the canonical archive only after explicit approval.
+- Scans Android `MediaStore.Audio` without uploading audio.
+- Canonical metadata with Latin normalization and preserved original-script aliases (including Persian).
+- Media3 playback with scoped queues, shuffle/repeat, play-next / add-to-queue, and session restore.
+- Listening events recorded locally for taste and Home personalization.
+- Home / Discover / Library / Search navigation with Import kept out of the primary listening path.
+- Local Discover ranking with explainable taste-match reasons (no fake remote recommendations).
+- Structured multi-label moods with manual override.
+- Chromaprint / AcoustID / MusicBrainz / Apple catalog identification (AcoustID needs `ACOUSTID_CLIENT_KEY`).
+- Atomic tag writes after explicit approval where the format is supported.
 
-## Safety boundary
+## Privacy
 
-This build never rewrites or deletes an audio file. Metadata edits—including accepted MusicBrainz matches—are canonical records in Room. Physical tag writing and Android's recoverable Trash flow belong to a later milestone, after format-by-format atomic-write tests are in place.
+Listening history and taste signals stay on-device by default. External catalog calls send only the metadata needed for a match.
 
 ## Recommended: build in GitHub Actions
 
-The repository includes `.github/workflows/android.yml`. GitHub builds and tests the app on a clean Linux runner, then publishes the debug APK as the `Archive-debug-apk` artifact. Android Studio is not required for this path.
-
-Follow [docs/GITHUB_BUILD.md](docs/GITHUB_BUILD.md) for the one-time setup and APK download steps.
-
-The cloud build is pinned to JDK 17, Gradle 8.9, Android Gradle Plugin 8.7.3, and Kotlin 2.1.0.
+Follow [docs/GITHUB_BUILD.md](docs/GITHUB_BUILD.md). The cloud build is pinned to JDK 17, Gradle 8.9, Android Gradle Plugin 8.7.3, and Kotlin 2.1.0.
 
 ## Optional: open in Android Studio
 
 1. Open the repository root.
-2. Use JDK 17.
-3. Select **Gradle wrapper** as the Gradle distribution. The project pins Gradle 8.9.
-4. Make sure Gradle **Offline work** is disabled for the first sync.
-5. Sync dependencies.
-6. Run on an Android 13+ device and grant Music and Audio access.
-7. Tap **Scan this device**.
-
-The project targets SDK 35 and supports Android 8+ (API 26). The build itself uses Java 17.
-
-## If local Android Gradle Plugin resolution fails
-
-Use the GitHub Actions build first. If it succeeds, the project and plugin versions are valid and the local machine is failing to reach Google's Maven repository.
-
-On Windows, run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\verify-repositories.ps1
-```
-
-Then check:
-
-1. Android Studio > Settings > Build, Execution, Deployment > Gradle > **Offline work** is off.
-2. **Gradle JDK** is Android Studio's JBR 17 or another JDK 17.
-3. `dl.google.com` is reachable through the active VPN/proxy.
-4. Gradle is set to use the wrapper configuration rather than an arbitrary local version.
-
-Do not add an untrusted Maven mirror merely to make the error disappear; build plugins execute code on the development machine.
-
-## Next milestone: trustworthy mutation
-
-1. Add exact fingerprint matching with Chromaprint/AcoustID and MusicBrainz.
-2. Add duplicate clusters with exact hash + acoustic similarity.
-3. Add an evidence screen comparing embedded, inferred, and remote metadata field by field.
-4. Implement atomic tag writes for MP3, FLAC, M4A/AAC, OGG, and Opus.
-5. Preserve pre-edit tags and validate the rewritten file before replacement.
-6. Use `MediaStore.createWriteRequest()` for consent and `createTrashRequest()` for recoverable removal.
-7. Export a portable JSON metadata snapshot and M3U playlists.
+2. Use JDK 17 and the Gradle wrapper.
+3. Sync, run on Android 8+, grant Music and Audio access.
+4. Tap **Import Music** / scan from Home or the Import inbox.
 
 ## Archive rules
 
-- No unidentified track enters the verified library.
+- No unidentified track enters the verified library without review.
 - Remote matches are suggestions, never silent truth.
-- Album edition and release date are explicit; remasters never overwrite originals.
-- Featured artists are modeled as credits, not embedded in a dirty title string.
-- Persian display names, Latin sort names, and aliases will be separate fields.
+- Featured artists should not live as dirty title strings.
+- Persian display/original fields are retained while Latin canonical values drive matching and UI.
 - A destructive operation must be recoverable or explicitly confirmed.
+
+## Roadmap (next)
+
+1. Paging for very large libraries (50k+).
+2. Playlist intelligence and gradual suggested tracks.
+3. Richer taste vectors and metal subgenre discovery.
+4. Portable backup of playlists, corrections, and taste profile.
+5. Recoverable MediaStore trash.

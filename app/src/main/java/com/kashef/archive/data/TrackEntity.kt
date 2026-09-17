@@ -1,6 +1,7 @@
 package com.kashef.archive.data
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.kashef.archive.domain.MoodClassifier
 
@@ -15,7 +16,17 @@ enum class ArchiveStatus {
     TRASH_SUGGESTED,
 }
 
-@Entity(tableName = "tracks")
+@Entity(
+    tableName = "tracks",
+    indices = [
+        Index(value = ["artist"]),
+        Index(value = ["album"]),
+        Index(value = ["title"]),
+        Index(value = ["status"]),
+        Index(value = ["dateModifiedSeconds"]),
+        Index(value = ["genre"]),
+    ],
+)
 data class TrackEntity(
     @PrimaryKey val contentUri: String,
     val mediaStoreId: Long,
@@ -56,4 +67,10 @@ data class TrackEntity(
 
     val moods: Set<String>
         get() = MoodClassifier.effective(this)
+
+    val displayTitle: String
+        get() = title.ifBlank { displayName }
+
+    val displayArtist: String
+        get() = artist.ifBlank { "Unknown artist" }
 }

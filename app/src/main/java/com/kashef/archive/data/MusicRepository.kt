@@ -36,6 +36,7 @@ data class PreparedMetadataChange(
 class MusicRepository(
     private val context: Context,
     private val dao: TrackDao,
+    private val listeningDao: ListeningEventDao,
     private val evaluator: MetadataQualityEvaluator,
     private val musicBrainz: MusicBrainzClient,
     private val appleCatalog: AppleCatalogClient,
@@ -44,6 +45,31 @@ class MusicRepository(
     private val tagWriter: MetadataTagWriter,
 ) {
     fun observeTracks(): Flow<List<TrackEntity>> = dao.observeAll()
+    fun observeRecentListening(limit: Int = 80): Flow<List<ListeningEventEntity>> =
+        listeningDao.observeRecent(limit)
+
+    suspend fun getTrack(uri: String): TrackEntity? = dao.getByUri(uri)
+
+    suspend fun getTracks(uris: List<String>): List<TrackEntity> {
+        if (uris.isEmpty()) return emptyList()
+        return uris.chunked(SQLITE_MAX_VARS).flatMap { dao.getByUris(it) }
+    }
+
+    suspend fun search(query: String, limit: Int = 80): List<TrackEntity> {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return emptyList()
+        return dao.search(trimmed, limit)
+    }
+
+    suspend fun recentListening(limit: Int = 80): List<ListeningEventEntity> =
+        listeningDao.recent(limit)
+
+    suspend fun heavyRotation(sinceMillis: Long, limit: Int = 20): List<TrackPlayAggregate> =
+        listeningDao.topTracksSince(sinceMillis, limit)
+
+    suspend fun recordListening(event: ListeningEventEntity) {
+        listeningDao.insert(event)
+    }
 
     suspend fun scanDevice(): ScanReport = withContext(Dispatchers.IO) {
         val existing = dao.getAllOnce().associateBy(TrackEntity::contentUri)
@@ -204,10 +230,31 @@ class MusicRepository(
 
         val indexed = markExactDuplicates(scanned)
         if (indexed.isNotEmpty()) {
-            dao.upsertAll(indexed)
-            dao.removeMissing(indexed.map(TrackEntity::contentUri))
+            indexed.chunked(UPSERT_BATCH).forEach { dao.upsertAll(it) }
+            removeMissingChunked(indexed.map(TrackEntity::contentUri))
+        } else if (existing.isNotEmpty()) {
+            dao.deleteAll()
         }
         ScanReport(found = indexed.size, addedOrUpdated = indexed.count { existing[it.contentUri] != it })
+    }
+
+    private suspend fun removeMissingChunked(activeUris: List<String>) {
+        if (activeUris.isEmpty()) {
+            dao.deleteAll()
+            return
+        }
+        if (activeUris.size <= SQLITE_MAX_VARS) {
+            dao.removeMissing(activeUris)
+            return
+        }
+        val keep = activeUris.toHashSet()
+        val stale = dao.getAllOnce().map(TrackEntity::contentUri).filterNot(keep::contains)
+        stale.chunked(SQLITE_MAX_VARS).forEach { dao.deleteUris(it) }
+    }
+
+    companion object {
+        private const val SQLITE_MAX_VARS = 900
+        private const val UPSERT_BATCH = 400
     }
 
     suspend fun edit(track: TrackEntity) {
