@@ -20,6 +20,9 @@ interface TrackDao {
     @Query("DELETE FROM tracks WHERE contentUri NOT IN (:activeUris)")
     suspend fun removeMissing(activeUris: List<String>)
 
+    @Query("DELETE FROM tracks WHERE contentUri IN (:uris)")
+    suspend fun deleteUris(uris: List<String>)
+
     @Query(
         """
         UPDATE tracks SET

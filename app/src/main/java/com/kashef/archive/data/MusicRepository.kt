@@ -66,6 +66,7 @@ class MusicRepository(
             MediaStore.Audio.Media.MIME_TYPE,
             MediaStore.Audio.Media.DATE_MODIFIED,
             MediaStore.Audio.Media.IS_MUSIC,
+            MediaStore.Audio.Media.ALBUM_ID,
         )
         if (android.os.Build.VERSION.SDK_INT >= 30) {
             projection += MediaStore.Audio.AudioColumns.ALBUM_ARTIST
@@ -91,6 +92,7 @@ class MusicRepository(
             val sizeIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE)
             val mimeIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.MIME_TYPE)
             val modifiedIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_MODIFIED)
+            val albumIdIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
             val albumArtistIndex = cursor.getColumnIndex(MediaStore.Audio.AudioColumns.ALBUM_ARTIST)
             val genreIndex = cursor.getColumnIndex(MediaStore.Audio.AudioColumns.GENRE)
             val bitrateIndex = cursor.getColumnIndex(MediaStore.MediaColumns.BITRATE)
@@ -119,7 +121,12 @@ class MusicRepository(
                 val trackNumber = cursor.getIntOrNull(trackIndex)?.let { it % 1000 }
                 val duration = cursor.getLong(durationIndex)
                 val bitrate = cursor.getIntOrNull(bitrateIndex) ?: prior?.bitrate
-                val hasArtwork = prior?.hasArtwork ?: false
+                val albumId = cursor.getLong(albumIdIndex)
+                val hasArtwork = when {
+                    prior?.hasArtwork == true -> true
+                    albumId > 0L -> hasAlbumArtwork(albumId)
+                    else -> false
+                }
                 val snapshot = MetadataSnapshot(
                     displayName = displayName,
                     title = title,
@@ -134,12 +141,7 @@ class MusicRepository(
                     hasArtwork = hasArtwork,
                 )
                 val quality = evaluator.evaluate(snapshot)
-                val status = when {
-                    duration <= 0 -> ArchiveStatus.CORRUPTED
-                    quality.score < 45 -> ArchiveStatus.UNIDENTIFIED
-                    quality.score < 75 -> ArchiveStatus.NEEDS_REVIEW
-                    else -> ArchiveStatus.NEEDS_REVIEW
-                }
+                val status = resolveScanStatus(duration, quality.score, prior)
 
                 val discovered = TrackEntity(
                     contentUri = uri.toString(),
@@ -167,6 +169,11 @@ class MusicRepository(
                     originalAlbumArtist = rawAlbumArtist.takeIf { it != albumArtist }.orEmpty(),
                     originalAlbum = rawAlbum.takeIf { it != album }.orEmpty(),
                     inferredMoodTags = MoodClassifier.infer(title, album, rawGenre).joinToString("|"),
+                    verifiedAtMillis = if (status == ArchiveStatus.VERIFIED) {
+                        prior?.verifiedAtMillis ?: System.currentTimeMillis()
+                    } else {
+                        null
+                    },
                 )
                 val enriched = prior?.let {
                     discovered.copy(
@@ -192,7 +199,17 @@ class MusicRepository(
                         year = prior.year,
                         trackNumber = prior.trackNumber,
                         discNumber = prior.discNumber,
-                        status = ArchiveStatus.NEEDS_REVIEW,
+                        // Keep verified curator records verified; otherwise force review.
+                        status = if (prior.status == ArchiveStatus.VERIFIED) {
+                            ArchiveStatus.VERIFIED
+                        } else {
+                            ArchiveStatus.NEEDS_REVIEW
+                        },
+                        verifiedAtMillis = if (prior.status == ArchiveStatus.VERIFIED) {
+                            prior.verifiedAtMillis ?: System.currentTimeMillis()
+                        } else {
+                            null
+                        },
                         issueCodes = listOf(prior.issueCodes, "SOURCE_CHANGED_EXTERNALLY")
                             .filter(String::isNotBlank)
                             .joinToString("|"),
@@ -205,9 +222,32 @@ class MusicRepository(
         val indexed = markExactDuplicates(scanned)
         if (indexed.isNotEmpty()) {
             dao.upsertAll(indexed)
-            dao.removeMissing(indexed.map(TrackEntity::contentUri))
+            syncRemovedTracks(existing.keys, indexed.map(TrackEntity::contentUri))
         }
         ScanReport(found = indexed.size, addedOrUpdated = indexed.count { existing[it.contentUri] != it })
+    }
+
+    private fun resolveScanStatus(durationMs: Long, score: Int, prior: TrackEntity?): ArchiveStatus = when {
+        durationMs <= 0 -> ArchiveStatus.CORRUPTED
+        score < 45 -> ArchiveStatus.UNIDENTIFIED
+        score < 75 -> ArchiveStatus.LOW_QUALITY
+        prior?.status == ArchiveStatus.VERIFIED && score >= 90 -> ArchiveStatus.VERIFIED
+        else -> ArchiveStatus.NEEDS_REVIEW
+    }
+
+    private fun hasAlbumArtwork(albumId: Long): Boolean {
+        val artUri = ContentUris.withAppendedId(ALBUM_ART_URI, albumId)
+        return runCatching {
+            context.contentResolver.openInputStream(artUri)?.use { true } ?: false
+        }.getOrDefault(false)
+    }
+
+    private suspend fun syncRemovedTracks(previousUris: Set<String>, activeUris: List<String>) {
+        val active = activeUris.toHashSet()
+        val stale = previousUris.filterNot(active::contains)
+        if (stale.isEmpty()) return
+        // Chunk deletes to stay under SQLite variable limits on large libraries.
+        stale.chunked(400).forEach { chunk -> dao.deleteUris(chunk) }
     }
 
     suspend fun edit(track: TrackEntity) {
@@ -487,6 +527,8 @@ private fun TrackEntity.toMetadataSnapshot() = MetadataSnapshot(
     bitrate = bitrate,
     hasArtwork = hasArtwork,
 )
+
+private val ALBUM_ART_URI: Uri = Uri.parse("content://media/external/audio/albumart")
 
 private data class EmbeddedMetadata(
     val title: String = "",

@@ -56,6 +56,7 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
     private val metadataSearch = MutableStateFlow(MetadataSearchState())
     private val mutablePendingMetadataChange = MutableStateFlow<PreparedMetadataChange?>(null)
     private var metadataSearchJob: Job? = null
+    private var didRestorePlayback = false
     val pendingMetadataChange: StateFlow<PreparedMetadataChange?> = mutablePendingMetadataChange
     val playback = (application as ArchiveApplication).playback
 
@@ -64,6 +65,17 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
     ) { tracks, isScanning, latestReport, latestError, search ->
         ArchiveUiState(tracks, isScanning, latestReport, latestError, search)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ArchiveUiState())
+
+    init {
+        viewModelScope.launch {
+            state.collect { ui ->
+                if (!didRestorePlayback && ui.tracks.isNotEmpty()) {
+                    didRestorePlayback = true
+                    playback.restoreSavedQueue(ui.tracks.associateBy(TrackEntity::contentUri))
+                }
+            }
+        }
+    }
 
     fun scan() {
         if (scanning.value) return
@@ -91,9 +103,16 @@ class ArchiveViewModel(application: Application) : AndroidViewModel(application)
 
     fun playTrack(track: TrackEntity) {
         if (!track.isPlayable()) return
-        val queue = state.value.tracks.filter {
-            it.isPlayable()
+        val library = state.value.tracks.filter(TrackEntity::isPlayable)
+        val albumQueue = if (track.album.isNotBlank()) {
+            library.filter {
+                it.album.equals(track.album, ignoreCase = true) &&
+                    it.artist.equals(track.artist, ignoreCase = true)
+            }
+        } else {
+            emptyList()
         }
+        val queue = if (albumQueue.size > 1) albumQueue else library
         playback.playQueue(queue, queue.indexOfFirst { it.contentUri == track.contentUri }.coerceAtLeast(0))
     }
 

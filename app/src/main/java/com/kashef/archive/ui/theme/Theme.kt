@@ -6,7 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
 private val ArchiveColors = darkColorScheme(
-    primary = Color(0xFFFF6B1A),
+    primary = Color(0xFFFF6A00),
     onPrimary = Color(0xFF160A04),
     primaryContainer = Color(0xFF4A1D08),
     onPrimaryContainer = Color(0xFFFFDCC9),
