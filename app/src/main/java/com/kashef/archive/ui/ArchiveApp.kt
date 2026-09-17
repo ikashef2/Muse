@@ -45,7 +45,6 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.KeyboardArrowRight
@@ -75,6 +74,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
@@ -86,12 +86,15 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -109,26 +112,33 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.Player
-import com.kashef.archive.data.ArchiveStatus
-import com.kashef.archive.data.MetadataCandidate
+import androidx.paging.PagingData
+import androidx.paging.compose.collectAsLazyPagingItems
+import androidx.paging.compose.itemKey
+import com.kashef.archive.data.CollectionCount
 import com.kashef.archive.data.IdentificationPhase
+import com.kashef.archive.data.MetadataCandidate
 import com.kashef.archive.data.TrackEntity
 import com.kashef.archive.domain.GeneratedPlaylist
-import com.kashef.archive.domain.PlaylistGenerator
 import com.kashef.archive.domain.PlaylistMood
 import com.kashef.archive.playback.PlaybackState
+import com.kashef.archive.playback.QueueItem
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
 private enum class Destination(val label: String, val icon: ImageVector) {
     PLAYER("Player", Icons.Default.Headphones),
     LIBRARY("Library", Icons.Default.LibraryMusic),
+    SEARCH("Search", Icons.Default.Search),
     PLAYLISTS("Playlists", Icons.Default.QueueMusic),
-    IMPORT("Import", Icons.Default.FileDownload),
 }
 
 private enum class LibraryMode(val label: String) { ARTISTS("Artists"), ALBUMS("Albums"), SONGS("Songs"), GENRES("Genres") }
+
+private const val COLLECTION_PAGE_SIZE = 40
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -140,10 +150,8 @@ fun ArchiveApp(viewModel: ArchiveViewModel = viewModel()) {
     val snackbarHostState = remember { SnackbarHostState() }
     var destinationName by rememberSaveable { mutableStateOf(Destination.PLAYER.name) }
     val destination = Destination.entries.firstOrNull { it.name == destinationName } ?: Destination.PLAYER
+    var showImport by rememberSaveable { mutableStateOf(false) }
     var editorTrack by remember { mutableStateOf<TrackEntity?>(null) }
-    val generator = remember { PlaylistGenerator() }
-    val mixes = remember(state.tracks) { PlaylistMood.entries.map { generator.generate(state.tracks, it) } }
-    val currentTrack = state.tracks.firstOrNull { it.contentUri == playback.mediaId }
     val audioPermission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
     val permissions = buildList {
         add(audioPermission)
@@ -178,65 +186,92 @@ fun ArchiveApp(viewModel: ArchiveViewModel = viewModel()) {
         }
     }
 
+    LaunchedEffect(showImport) {
+        if (showImport) viewModel.loadImportPage()
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
-            Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
-                Column {
-                    if (destination != Destination.PLAYER && playback.mediaId != null) {
-                        MiniPlayer(playback, viewModel.playback::toggle, viewModel.playback::next)
-                    }
-                    NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                        Destination.entries.forEach { item ->
-                            NavigationBarItem(
-                                selected = destination == item,
-                                onClick = { destinationName = item.name },
-                                icon = { Icon(item.icon, contentDescription = null) },
-                                label = { Text(item.label) },
-                            )
+            if (!showImport) {
+                Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
+                    Column {
+                        if (destination != Destination.PLAYER && playback.mediaId != null) {
+                            MiniPlayer(playback, viewModel.playback::toggle, viewModel.playback::next)
+                        }
+                        NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                            Destination.entries.forEach { item ->
+                                NavigationBarItem(
+                                    selected = destination == item,
+                                    onClick = { destinationName = item.name },
+                                    icon = { Icon(item.icon, contentDescription = null) },
+                                    label = { Text(item.label) },
+                                )
+                            }
                         }
                     }
                 }
             }
         },
     ) { padding ->
-        when (destination) {
-            Destination.PLAYER -> PlayerScreen(
+        if (showImport) {
+            ImportScreen(
                 state = state,
-                playback = playback,
-                currentTrack = currentTrack,
-                mixes = mixes,
-                onScan = requestScan,
-                onPlayTrack = viewModel::playTrack,
-                onPlayMix = { tracks -> viewModel.playQueue(tracks) },
-                onToggle = viewModel.playback::toggle,
-                onPrevious = viewModel.playback::previous,
-                onNext = viewModel.playback::next,
-                onShuffle = viewModel.playback::toggleShuffle,
-                onRepeat = viewModel.playback::cycleRepeatMode,
-                onSeek = viewModel.playback::seekTo,
-                onToggleMood = viewModel::toggleMood,
-                modifier = Modifier.padding(padding),
-            )
-            Destination.LIBRARY -> LibraryScreen(state.tracks, viewModel::playQueue, Modifier.padding(padding))
-            Destination.PLAYLISTS -> PlaylistsScreen(
-                mixes = mixes,
-                moodTrack = currentTrack
-                    ?: state.tracks.firstOrNull { it.moods.isEmpty() }
-                    ?: state.tracks.firstOrNull(),
-                onPlay = { tracks -> viewModel.playQueue(tracks) },
-                onToggleMood = viewModel::toggleMood,
-                modifier = Modifier.padding(padding),
-            )
-            Destination.IMPORT -> ImportScreen(
-                state = state,
+                onBack = { showImport = false },
                 onScan = requestScan,
                 onEdit = { editorTrack = it },
                 onVerify = viewModel::verify,
                 onTrash = viewModel::suggestTrash,
                 modifier = Modifier.padding(padding),
             )
+        } else {
+            when (destination) {
+                Destination.PLAYER -> PlayerScreen(
+                    state = state,
+                    playback = playback,
+                    onScan = requestScan,
+                    onPlayTrack = viewModel::playTrack,
+                    onPlayMix = viewModel::playMix,
+                    onToggle = viewModel.playback::toggle,
+                    onPrevious = viewModel.playback::previous,
+                    onNext = viewModel.playback::next,
+                    onShuffle = viewModel.playback::toggleShuffle,
+                    onRepeat = viewModel.playback::cycleRepeatMode,
+                    onSeek = viewModel.playback::seekTo,
+                    onToggleMood = viewModel::toggleMood,
+                    onPlayQueueIndex = viewModel.playback::playQueueIndex,
+                    modifier = Modifier.padding(padding),
+                )
+                Destination.LIBRARY -> LibraryScreen(
+                    playablePaging = viewModel.playablePaging,
+                    onPlayTrack = viewModel::playTrack,
+                    onPlayQueue = viewModel::playQueue,
+                    loadArtistPage = viewModel::loadArtistPage,
+                    loadAlbumPage = viewModel::loadAlbumPage,
+                    loadGenrePage = viewModel::loadGenrePage,
+                    openArtist = viewModel::openArtist,
+                    openAlbum = viewModel::openAlbum,
+                    openGenre = viewModel::openGenre,
+                    onOpenImport = { showImport = true },
+                    modifier = Modifier.padding(padding),
+                )
+                Destination.SEARCH -> SearchScreen(
+                    query = state.searchQuery,
+                    results = state.searchResults,
+                    isLoading = state.isSearchLoading,
+                    onQueryChange = viewModel::setSearchQuery,
+                    onPlayTrack = viewModel::playTrack,
+                    modifier = Modifier.padding(padding),
+                )
+                Destination.PLAYLISTS -> PlaylistsScreen(
+                    mixes = state.mixes,
+                    moodTrack = state.moodTeacherTrack,
+                    onPlay = viewModel::playMix,
+                    onToggleMood = viewModel::toggleMood,
+                    modifier = Modifier.padding(padding),
+                )
+            }
         }
     }
 
@@ -272,15 +307,14 @@ private fun AppHeader(eyebrow: String, title: String) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PlayerScreen(
     state: ArchiveUiState,
     playback: PlaybackState,
-    currentTrack: TrackEntity?,
-    mixes: List<GeneratedPlaylist>,
     onScan: () -> Unit,
     onPlayTrack: (TrackEntity) -> Unit,
-    onPlayMix: (List<TrackEntity>) -> Unit,
+    onPlayMix: (GeneratedPlaylist) -> Unit,
     onToggle: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
@@ -288,18 +322,22 @@ private fun PlayerScreen(
     onRepeat: () -> Unit,
     onSeek: (Long) -> Unit,
     onToggleMood: (TrackEntity, String) -> Unit,
+    onPlayQueueIndex: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var showQueueSheet by remember { mutableStateOf(false) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
         item { AppHeader("Muse / 04", "Now playing") }
-        if (state.tracks.isEmpty()) {
+        if (!state.hasLibrary) {
             item { EmptyLibrary(onScan, state.isScanning) }
         } else {
-            val shownTrack = currentTrack
+            val shownTrack = state.currentTrack
             if (shownTrack == null) {
                 item {
                     Card(
@@ -323,8 +361,32 @@ private fun PlayerScreen(
                 item {
                     Row(verticalAlignment = Alignment.Top) {
                         Column(Modifier.weight(1f)) {
-                            Text(shownTrack.title.ifBlank { shownTrack.displayName }, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(shownTrack.artist.ifBlank { "Unknown artist" }, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                            Text(
+                                shownTrack.title.ifBlank { shownTrack.displayName },
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                shownTrack.artist.ifBlank { "Unknown artist" },
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                            if (playback.queueContext.isNotBlank()) {
+                                Text(
+                                    playback.queueContext,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                        if (playback.queue.isNotEmpty()) {
+                            IconButton(onClick = { showQueueSheet = true }) {
+                                Icon(Icons.Default.QueueMusic, contentDescription = "Open queue")
+                            }
                         }
                     }
                 }
@@ -384,12 +446,91 @@ private fun PlayerScreen(
             item { SectionTitle("Made for this moment", "Generated from your archive") }
             item {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    items(mixes, key = { it.mood.name }) { mix ->
-                        MoodTile(mix, enabled = mix.tracks.isNotEmpty()) { onPlayMix(mix.tracks) }
+                    items(state.mixes, key = { it.mood.name }) { mix ->
+                        MoodTile(mix, enabled = mix.tracks.isNotEmpty()) { onPlayMix(mix) }
                     }
                 }
             }
         }
+    }
+
+    if (showQueueSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showQueueSheet = false },
+            sheetState = sheetState,
+        ) {
+            QueueSheetContent(
+                queue = playback.queue,
+                queueContext = playback.queueContext,
+                queueIndex = playback.queueIndex,
+                onPlayIndex = { index ->
+                    onPlayQueueIndex(index)
+                    showQueueSheet = false
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun QueueSheetContent(
+    queue: List<QueueItem>,
+    queueContext: String,
+    queueIndex: Int,
+    onPlayIndex: (Int) -> Unit,
+) {
+    LazyColumn(
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        item {
+            Text("Up next", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            if (queueContext.isNotBlank()) {
+                Text(queueContext, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        itemsIndexed(queue, key = { index, item -> "${item.mediaId}-$index" }) { index, item ->
+            val selected = index == queueIndex
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onPlayIndex(index) }
+                    .background(
+                        if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                        else Color.Transparent,
+                        RoundedCornerShape(12.dp),
+                    )
+                    .padding(horizontal = 10.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "${index + 1}",
+                    modifier = Modifier.width(28.dp),
+                    color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        item.title,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        item.artist,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+                if (selected) {
+                    Icon(Icons.Default.MusicNote, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
+        item { Spacer(Modifier.height(24.dp)) }
     }
 }
 
@@ -498,32 +639,69 @@ private fun EmptyLibrary(onScan: () -> Unit, isScanning: Boolean) {
 
 @Composable
 private fun LibraryScreen(
-    tracks: List<TrackEntity>,
-    onPlayQueue: (List<TrackEntity>, Int) -> Unit,
+    playablePaging: StateFlow<PagingData<TrackEntity>>,
+    onPlayTrack: (TrackEntity) -> Unit,
+    onPlayQueue: (List<TrackEntity>, Int, String) -> Unit,
+    loadArtistPage: suspend (Int, Int) -> List<CollectionCount>,
+    loadAlbumPage: suspend (Int, Int) -> List<CollectionCount>,
+    loadGenrePage: suspend (Int, Int) -> List<CollectionCount>,
+    openArtist: suspend (String) -> List<TrackEntity>,
+    openAlbum: suspend (String) -> List<TrackEntity>,
+    openGenre: suspend (String) -> List<TrackEntity>,
+    onOpenImport: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val playableTracks = remember(tracks) {
-        tracks.filter {
-            it.durationMs > 0 &&
-                it.status != ArchiveStatus.CORRUPTED &&
-                it.status != ArchiveStatus.TRASH_SUGGESTED
+    val songs = playablePaging.collectAsLazyPagingItems()
+    val scope = rememberCoroutineScope()
+    var mode by rememberSaveable { mutableStateOf(LibraryMode.ARTISTS.name) }
+    val libraryMode = LibraryMode.entries.firstOrNull { it.name == mode } ?: LibraryMode.ARTISTS
+    var openCollection by remember { mutableStateOf<Pair<String, List<TrackEntity>>?>(null) }
+    var openingCollection by remember { mutableStateOf(false) }
+    var collections by remember { mutableStateOf<List<CollectionCount>>(emptyList()) }
+    var collectionsOffset by remember { mutableIntStateOf(0) }
+    var collectionsHasMore by remember { mutableStateOf(true) }
+    var collectionsLoading by remember { mutableStateOf(false) }
+
+    suspend fun loadCollectionPage(reset: Boolean) {
+        if (libraryMode == LibraryMode.SONGS) return
+        if (collectionsLoading) return
+        if (!reset && !collectionsHasMore) return
+        collectionsLoading = true
+        val offset = if (reset) 0 else collectionsOffset
+        val page = when (libraryMode) {
+            LibraryMode.ARTISTS -> loadArtistPage(offset, COLLECTION_PAGE_SIZE)
+            LibraryMode.ALBUMS -> loadAlbumPage(offset, COLLECTION_PAGE_SIZE)
+            LibraryMode.GENRES -> loadGenrePage(offset, COLLECTION_PAGE_SIZE)
+            LibraryMode.SONGS -> emptyList()
+        }
+        collections = if (reset) page else collections + page
+        collectionsOffset = offset + page.size
+        collectionsHasMore = page.size >= COLLECTION_PAGE_SIZE
+        collectionsLoading = false
+    }
+
+    LaunchedEffect(libraryMode) {
+        openCollection = null
+        collections = emptyList()
+        collectionsOffset = 0
+        collectionsHasMore = true
+        loadCollectionPage(reset = true)
+    }
+
+    fun openNamedCollection(name: String) {
+        scope.launch {
+            openingCollection = true
+            val tracks = when (libraryMode) {
+                LibraryMode.ARTISTS -> openArtist(name)
+                LibraryMode.ALBUMS -> openAlbum(name)
+                LibraryMode.GENRES -> openGenre(name)
+                LibraryMode.SONGS -> emptyList()
+            }
+            openCollection = name to tracks
+            openingCollection = false
         }
     }
-    var query by remember { mutableStateOf("") }
-    var mode by remember { mutableStateOf(LibraryMode.ARTISTS) }
-    var openCollection by remember { mutableStateOf<Pair<String, List<TrackEntity>>?>(null) }
-    val filtered = remember(playableTracks, query) {
-        playableTracks.filter { query.isBlank() || listOf(it.title, it.artist, it.album, it.genre).any { field -> field.contains(query, true) } }
-    }
-    val artists = remember(filtered) {
-        filtered.groupBy { it.artist.ifBlank { "Unknown artist" } }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
-    }
-    val albums = remember(filtered) {
-        filtered.groupBy { it.album.ifBlank { "Unknown album" } }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
-    }
-    val genres = remember(filtered) {
-        filtered.groupBy { it.genre.ifBlank { "Unclassified" } }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
-    }
+
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         openCollection?.let { (name, collectionTracks) ->
             item {
@@ -539,15 +717,106 @@ private fun LibraryScreen(
                 }
             }
             itemsIndexed(collectionTracks, key = { _, track -> track.contentUri }) { index, track ->
-                TrackRow(track) { onPlayQueue(collectionTracks, index) }
+                val contextLabel = when (libraryMode) {
+                    LibraryMode.ARTISTS -> "Artist · $name"
+                    LibraryMode.ALBUMS -> "Album · $name"
+                    LibraryMode.GENRES -> "Genre · $name"
+                    LibraryMode.SONGS -> ""
+                }
+                TrackRow(track) { onPlayQueue(collectionTracks, index, contextLabel) }
             }
             return@LazyColumn
         }
-        item { AppHeader("Your archive", "Library") }
+
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) { AppHeader("Your archive", "Library") }
+                IconButton(onClick = onOpenImport) {
+                    Icon(Icons.Default.Edit, contentDescription = "Metadata tools")
+                }
+            }
+        }
+        item {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LibraryMode.entries.forEach { item ->
+                    if (libraryMode == item) Button(onClick = { mode = item.name }) { Text(item.label) }
+                    else OutlinedButton(onClick = { mode = item.name }) { Text(item.label) }
+                }
+            }
+        }
+        if (openingCollection) {
+            item {
+                Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            }
+        }
+        when (libraryMode) {
+            LibraryMode.SONGS -> {
+                items(
+                    count = songs.itemCount,
+                    key = songs.itemKey { it.contentUri },
+                ) { index ->
+                    val track = songs[index]
+                    if (track != null) {
+                        TrackRow(track, onPlayTrack)
+                    }
+                }
+                if (songs.loadState.append is androidx.paging.LoadState.Loading ||
+                    songs.loadState.refresh is androidx.paging.LoadState.Loading
+                ) {
+                    item {
+                        Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp)
+                        }
+                    }
+                }
+            }
+            LibraryMode.ARTISTS, LibraryMode.ALBUMS, LibraryMode.GENRES -> {
+                items(collections, key = { "${libraryMode.name}:${it.name}" }) { entry ->
+                    val icon = when (libraryMode) {
+                        LibraryMode.ARTISTS -> Icons.Default.Headphones
+                        LibraryMode.ALBUMS -> Icons.Default.Album
+                        else -> Icons.Default.MusicNote
+                    }
+                    val subtitle = when (libraryMode) {
+                        LibraryMode.ALBUMS -> "${entry.trackCount} tracks"
+                        else -> "${entry.trackCount} tracks"
+                    }
+                    CollectionRow(entry.name, subtitle, icon) { openNamedCollection(entry.name) }
+                }
+                if (collectionsHasMore) {
+                    item {
+                        LaunchedEffect(collectionsOffset, libraryMode) {
+                            loadCollectionPage(reset = false)
+                        }
+                        Box(Modifier.fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
+                            if (collectionsLoading) {
+                                CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchScreen(
+    query: String,
+    results: List<TrackEntity>,
+    isLoading: Boolean,
+    onQueryChange: (String) -> Unit,
+    onPlayTrack: (TrackEntity) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item { AppHeader("Find anything", "Search") }
         item {
             OutlinedTextField(
                 value = query,
-                onValueChange = { query = it },
+                onValueChange = onQueryChange,
                 modifier = Modifier.fillMaxWidth(),
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                 placeholder = { Text("Artist, album or song") },
@@ -555,38 +824,20 @@ private fun LibraryScreen(
                 shape = RoundedCornerShape(16.dp),
             )
         }
-        item {
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                LibraryMode.entries.forEach { item ->
-                    if (mode == item) Button(onClick = { mode = item }) { Text(item.label) }
-                    else OutlinedButton(onClick = { mode = item }) { Text(item.label) }
+        when {
+            isLoading -> item {
+                Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
                 }
             }
-        }
-        when (mode) {
-            LibraryMode.SONGS -> itemsIndexed(filtered, key = { _, track -> track.contentUri }) { index, track ->
-                TrackRow(track) { onPlayQueue(filtered, index) }
+            query.isBlank() -> item {
+                Text("Start typing to search your archive.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            LibraryMode.ARTISTS -> {
-                items(artists.entries.toList(), key = { it.key }) { (artist, artistTracks) ->
-                    CollectionRow(artist, "${artistTracks.size} tracks", Icons.Default.Headphones) {
-                        openCollection = artist to artistTracks
-                    }
-                }
+            results.isEmpty() -> item {
+                Text("No matching tracks.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            LibraryMode.ALBUMS -> {
-                items(albums.entries.toList(), key = { it.key }) { (album, albumTracks) ->
-                    CollectionRow(album, "${albumTracks.firstOrNull()?.artist.orEmpty()} · ${albumTracks.size} tracks", Icons.Default.Album) {
-                        openCollection = album to albumTracks
-                    }
-                }
-            }
-            LibraryMode.GENRES -> {
-                items(genres.entries.toList(), key = { it.key }) { (genre, genreTracks) ->
-                    CollectionRow(genre, "${genreTracks.size} tracks", Icons.Default.MusicNote) {
-                        openCollection = genre to genreTracks
-                    }
-                }
+            else -> items(results, key = TrackEntity::contentUri) { track ->
+                TrackRow(track, onPlayTrack)
             }
         }
     }
@@ -626,7 +877,7 @@ private fun TrackRow(track: TrackEntity, onPlay: (TrackEntity) -> Unit) {
 private fun PlaylistsScreen(
     mixes: List<GeneratedPlaylist>,
     moodTrack: TrackEntity?,
-    onPlay: (List<TrackEntity>) -> Unit,
+    onPlay: (GeneratedPlaylist) -> Unit,
     onToggleMood: (TrackEntity, String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -634,7 +885,7 @@ private fun PlaylistsScreen(
         item { AppHeader("Adaptive mixes", "Playlists") }
         items(mixes, key = { it.mood.name }) { mix ->
             Card(
-                modifier = Modifier.fillMaxWidth().clickable(enabled = mix.tracks.isNotEmpty()) { onPlay(mix.tracks) },
+                modifier = Modifier.fillMaxWidth().clickable(enabled = mix.tracks.isNotEmpty()) { onPlay(mix) },
                 colors = CardDefaults.cardColors(containerColor = if (mix.mood == PlaylistMood.ENERGY) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant),
                 shape = RoundedCornerShape(22.dp),
             ) {
@@ -687,24 +938,38 @@ private fun MoodTeacher(track: TrackEntity, onToggle: (String) -> Unit) {
 @Composable
 private fun ImportScreen(
     state: ArchiveUiState,
+    onBack: () -> Unit,
     onScan: () -> Unit,
     onEdit: (TrackEntity) -> Unit,
     onVerify: (TrackEntity) -> Unit,
     onTrash: (TrackEntity) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val pending = state.tracks.filter {
-        it.status != ArchiveStatus.VERIFIED &&
-            it.status != ArchiveStatus.CORRUPTED &&
-            it.status != ArchiveStatus.TRASH_SUGGESTED
-    }
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        item { AppHeader("Metadata workspace", "Import") }
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = "Back to library")
+                }
+                Column(Modifier.weight(1f)) {
+                    Text("METADATA WORKSPACE", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
+                    Text("Import", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
         item {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer), shape = RoundedCornerShape(24.dp)) {
                 Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Ready to inspect", color = MaterialTheme.colorScheme.onPrimaryContainer)
-                    Text("${pending.size} tracks", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        "${state.pendingReview} pending · ${state.summary.playable} playable",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        "${state.summary.total} indexed · ${state.summary.verified} verified",
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
                     Button(onClick = onScan, enabled = !state.isScanning, modifier = Modifier.fillMaxWidth()) {
                         if (state.isScanning) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Refresh, contentDescription = null)
                         Spacer(Modifier.width(8.dp)); Text(if (state.isScanning) "Scanning device…" else "Scan for new music")
@@ -714,10 +979,13 @@ private fun ImportScreen(
         }
         state.report?.let { report -> item { Text("${report.found} indexed · ${report.addedOrUpdated} changed", color = MaterialTheme.colorScheme.onSurfaceVariant) } }
         state.error?.let { item { Text(it, color = MaterialTheme.colorScheme.error) } }
-        if (pending.isEmpty()) item {
-            Text(if (state.tracks.isEmpty()) "Scan your device to begin." else "Your archive is clean.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (state.importTracks.isEmpty()) item {
+            Text(
+                if (!state.hasLibrary) "Scan your device to begin." else "Your archive is clean.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
-        items(pending, key = TrackEntity::contentUri) { track ->
+        items(state.importTracks, key = TrackEntity::contentUri) { track ->
             ImportTrackCard(track, onEdit, onVerify, onTrash)
         }
     }
