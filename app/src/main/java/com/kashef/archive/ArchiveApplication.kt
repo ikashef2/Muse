@@ -6,6 +6,7 @@ import com.kashef.archive.data.ArchiveDatabase
 import com.kashef.archive.data.AcoustIdClient
 import com.kashef.archive.data.AppleCatalogClient
 import com.kashef.archive.data.ChromaprintEngine
+import com.kashef.archive.data.MIGRATION_2_3
 import com.kashef.archive.data.MusicRepository
 import com.kashef.archive.data.MusicBrainzClient
 import com.kashef.archive.data.MetadataTagWriter
@@ -17,7 +18,9 @@ class ArchiveApplication : Application() {
 
     val database: ArchiveDatabase by lazy {
         Room.databaseBuilder(this, ArchiveDatabase::class.java, "archive.db")
-            .fallbackToDestructiveMigration()
+            .addMigrations(MIGRATION_2_3)
+            // Only wipe truly ancient v1 installs; never destroy v2→v3+ upgrades.
+            .fallbackToDestructiveMigrationFrom(1)
             .build()
     }
 

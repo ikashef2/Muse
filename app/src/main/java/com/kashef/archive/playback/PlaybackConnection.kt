@@ -5,19 +5,26 @@ import android.content.Context
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.kashef.archive.data.TrackEntity
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+data class QueueItem(
+    val mediaId: String,
+    val title: String,
+    val artist: String,
+)
 
 data class PlaybackState(
     val connected: Boolean = false,
@@ -31,12 +38,18 @@ data class PlaybackState(
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
     val shuffleEnabled: Boolean = false,
+    val repeatMode: Int = Player.REPEAT_MODE_OFF,
+    val error: String? = null,
+    val queueContext: String = "",
+    val queueIndex: Int = 0,
+    val queue: List<QueueItem> = emptyList(),
 )
 
 class PlaybackConnection(context: Context) {
     private val appContext = context.applicationContext
     private val executor = ContextCompat.getMainExecutor(appContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val sessionStore = PlaybackSessionStore(appContext)
     private val controllerFuture = MediaController.Builder(
         appContext,
         SessionToken(appContext, ComponentName(appContext, PlaybackService::class.java)),
@@ -44,9 +57,22 @@ class PlaybackConnection(context: Context) {
     private var controller: MediaController? = null
     private val mutableState = MutableStateFlow(PlaybackState())
     val state: StateFlow<PlaybackState> = mutableState.asStateFlow()
+    private var pendingRestore: PlaybackSessionStore.Session? = sessionStore.load()
+    private var lastQueueIds: List<String> = pendingRestore?.mediaIds.orEmpty()
+    private var queueContextLabel: String = pendingRestore?.contextLabel.orEmpty()
 
     private val listener = object : Player.Listener {
-        override fun onEvents(player: Player, events: Player.Events) = publish(player)
+        override fun onEvents(player: Player, events: Player.Events) {
+            publish(player)
+            persist(player)
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            mutableState.value = mutableState.value.copy(
+                error = error.message ?: "Playback failed.",
+                isPlaying = false,
+            )
+        }
     }
 
     init {
@@ -54,32 +80,101 @@ class PlaybackConnection(context: Context) {
             runCatching { controllerFuture.get() }.onSuccess { player ->
                 controller = player
                 player.addListener(listener)
+                restoreSessionIfNeeded(player)
                 publish(player)
             }
         }, executor)
         scope.launch {
             while (isActive) {
-                controller?.let(::publish)
+                controller?.let { player ->
+                    publish(player)
+                    if (player.isPlaying) persist(player)
+                }
                 delay(500L)
             }
         }
     }
 
-    fun playQueue(tracks: List<TrackEntity>, startIndex: Int = 0) {
+    fun playQueue(
+        tracks: List<TrackEntity>,
+        startIndex: Int = 0,
+        contextLabel: String = "",
+    ) {
         if (tracks.isEmpty()) return
         withController { player ->
             val items = tracks.map(TrackEntity::asMediaItem)
+            lastQueueIds = items.map { it.mediaId }
+            queueContextLabel = contextLabel.ifBlank { inferContext(tracks) }
+            pendingRestore = null
             player.setMediaItems(items, startIndex.coerceIn(items.indices), 0L)
             player.prepare()
+            player.play()
+            persist(player)
+            publish(player)
+        }
+    }
+
+    fun restoreSavedQueue(tracksByUri: Map<String, TrackEntity>) {
+        val saved = pendingRestore ?: sessionStore.load() ?: return
+        if (controller?.mediaItemCount?.let { it > 0 } == true) {
+            pendingRestore = null
+            return
+        }
+        val ordered = saved.mediaIds.mapNotNull { tracksByUri[it] }
+        if (ordered.isEmpty()) {
+            sessionStore.clear()
+            pendingRestore = null
+            return
+        }
+        val startUri = saved.mediaIds.getOrNull(saved.startIndex)
+        val startIndex = ordered.indexOfFirst { it.contentUri == startUri }.takeIf { it >= 0 } ?: 0
+        withController { player ->
+            lastQueueIds = ordered.map { it.contentUri }
+            queueContextLabel = saved.contextLabel.ifBlank { inferContext(ordered) }
+            player.shuffleModeEnabled = saved.shuffleEnabled
+            player.repeatMode = saved.repeatMode
+            player.setMediaItems(ordered.map(TrackEntity::asMediaItem), startIndex, saved.positionMs)
+            player.prepare()
+            if (saved.wasPlaying) player.play() else player.pause()
+            pendingRestore = null
+            persist(player)
+            publish(player)
+        }
+    }
+
+    fun playQueueIndex(index: Int) = withController { player ->
+        if (index in 0 until player.mediaItemCount) {
+            player.seekTo(index, 0L)
             player.play()
         }
     }
 
     fun toggle() = withController { if (it.isPlaying) it.pause() else it.play() }
     fun next() = withController { if (it.hasNextMediaItem()) it.seekToNextMediaItem() }
-    fun previous() = withController { if (it.hasPreviousMediaItem()) it.seekToPreviousMediaItem() else it.seekTo(0L) }
+    fun previous() = withController {
+        if (it.hasPreviousMediaItem()) it.seekToPreviousMediaItem() else it.seekTo(0L)
+    }
     fun seekTo(positionMs: Long) = withController { it.seekTo(positionMs.coerceAtLeast(0L)) }
-    fun toggleShuffle() = withController { it.shuffleModeEnabled = !it.shuffleModeEnabled }
+    fun toggleShuffle() = withController {
+        it.shuffleModeEnabled = !it.shuffleModeEnabled
+        persist(it)
+    }
+
+    fun cycleRepeatMode() = withController { player ->
+        player.repeatMode = when (player.repeatMode) {
+            Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ONE
+            Player.REPEAT_MODE_ONE -> Player.REPEAT_MODE_ALL
+            else -> Player.REPEAT_MODE_OFF
+        }
+        persist(player)
+        publish(player)
+    }
+
+    fun clearError() {
+        mutableState.value = mutableState.value.copy(error = null)
+    }
+
+    fun savedMediaIds(): List<String> = sessionStore.load()?.mediaIds.orEmpty()
 
     private fun withController(action: (MediaController) -> Unit) {
         controller?.let(action) ?: controllerFuture.addListener({
@@ -87,8 +182,55 @@ class PlaybackConnection(context: Context) {
         }, executor)
     }
 
+    private fun restoreSessionIfNeeded(player: Player) {
+        if (player.mediaItemCount > 0) {
+            pendingRestore = null
+        }
+    }
+
+    private fun persist(player: Player) {
+        val count = player.mediaItemCount
+        if (count <= 0) return
+        val ids = if (lastQueueIds.size == count) {
+            lastQueueIds
+        } else {
+            buildList {
+                for (i in 0 until count) {
+                    player.getMediaItemAt(i).mediaId.takeIf { it.isNotBlank() }?.let(::add)
+                }
+            }
+        }
+        if (ids.isEmpty()) return
+        lastQueueIds = ids
+        sessionStore.save(
+            PlaybackSessionStore.Session(
+                mediaIds = ids,
+                startIndex = player.currentMediaItemIndex.coerceIn(0, ids.lastIndex),
+                positionMs = player.currentPosition.coerceAtLeast(0L),
+                shuffleEnabled = player.shuffleModeEnabled,
+                repeatMode = player.repeatMode,
+                wasPlaying = player.isPlaying || player.playWhenReady,
+                contextLabel = queueContextLabel,
+            )
+        )
+    }
+
     private fun publish(player: Player) {
         val metadata = player.currentMediaItem?.mediaMetadata
+        val queue = buildList {
+            val count = player.mediaItemCount
+            for (i in 0 until count) {
+                val item = player.getMediaItemAt(i)
+                val meta = item.mediaMetadata
+                add(
+                    QueueItem(
+                        mediaId = item.mediaId,
+                        title = meta.title?.toString().orEmpty().ifBlank { "Track ${i + 1}" },
+                        artist = meta.artist?.toString().orEmpty(),
+                    )
+                )
+            }
+        }
         mutableState.value = PlaybackState(
             connected = true,
             isPlaying = player.isPlaying,
@@ -101,7 +243,25 @@ class PlaybackConnection(context: Context) {
             positionMs = player.currentPosition.coerceAtLeast(0L),
             durationMs = player.duration.takeIf { it > 0 } ?: 0L,
             shuffleEnabled = player.shuffleModeEnabled,
+            repeatMode = player.repeatMode,
+            error = mutableState.value.error,
+            queueContext = queueContextLabel,
+            queueIndex = player.currentMediaItemIndex.coerceAtLeast(0),
+            queue = queue,
         )
+    }
+
+    private fun inferContext(tracks: List<TrackEntity>): String {
+        if (tracks.isEmpty()) return "Queue"
+        val album = tracks.first().album
+        if (album.isNotBlank() && tracks.all { it.album.equals(album, ignoreCase = true) }) {
+            return "Album · $album"
+        }
+        val artist = tracks.first().artist
+        if (artist.isNotBlank() && tracks.all { it.artist.equals(artist, ignoreCase = true) }) {
+            return "Artist · $artist"
+        }
+        return "Queue · ${tracks.size} tracks"
     }
 }
 
