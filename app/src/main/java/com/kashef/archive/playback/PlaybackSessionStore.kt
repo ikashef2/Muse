@@ -16,6 +16,7 @@ class PlaybackSessionStore(context: Context) {
         val shuffleEnabled: Boolean,
         val repeatMode: Int,
         val wasPlaying: Boolean,
+        val contextLabel: String = "",
     )
 
     fun save(session: Session) {
@@ -30,6 +31,7 @@ class PlaybackSessionStore(context: Context) {
             .putBoolean(KEY_SHUFFLE, session.shuffleEnabled)
             .putInt(KEY_REPEAT, session.repeatMode)
             .putBoolean(KEY_WAS_PLAYING, session.wasPlaying)
+            .putString(KEY_CONTEXT, session.contextLabel)
             .apply()
     }
 
@@ -50,6 +52,7 @@ class PlaybackSessionStore(context: Context) {
             shuffleEnabled = prefs.getBoolean(KEY_SHUFFLE, false),
             repeatMode = prefs.getInt(KEY_REPEAT, 0),
             wasPlaying = prefs.getBoolean(KEY_WAS_PLAYING, false),
+            contextLabel = prefs.getString(KEY_CONTEXT, "").orEmpty(),
         )
     }
 
@@ -65,5 +68,6 @@ class PlaybackSessionStore(context: Context) {
         private const val KEY_SHUFFLE = "shuffle"
         private const val KEY_REPEAT = "repeat_mode"
         private const val KEY_WAS_PLAYING = "was_playing"
+        private const val KEY_CONTEXT = "context_label"
     }
 }

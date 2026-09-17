@@ -20,6 +20,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+data class QueueItem(
+    val mediaId: String,
+    val title: String,
+    val artist: String,
+)
+
 data class PlaybackState(
     val connected: Boolean = false,
     val isPlaying: Boolean = false,
@@ -34,6 +40,9 @@ data class PlaybackState(
     val shuffleEnabled: Boolean = false,
     val repeatMode: Int = Player.REPEAT_MODE_OFF,
     val error: String? = null,
+    val queueContext: String = "",
+    val queueIndex: Int = 0,
+    val queue: List<QueueItem> = emptyList(),
 )
 
 class PlaybackConnection(context: Context) {
@@ -50,6 +59,7 @@ class PlaybackConnection(context: Context) {
     val state: StateFlow<PlaybackState> = mutableState.asStateFlow()
     private var pendingRestore: PlaybackSessionStore.Session? = sessionStore.load()
     private var lastQueueIds: List<String> = pendingRestore?.mediaIds.orEmpty()
+    private var queueContextLabel: String = pendingRestore?.contextLabel.orEmpty()
 
     private val listener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
@@ -85,23 +95,25 @@ class PlaybackConnection(context: Context) {
         }
     }
 
-    fun playQueue(tracks: List<TrackEntity>, startIndex: Int = 0) {
+    fun playQueue(
+        tracks: List<TrackEntity>,
+        startIndex: Int = 0,
+        contextLabel: String = "",
+    ) {
         if (tracks.isEmpty()) return
         withController { player ->
             val items = tracks.map(TrackEntity::asMediaItem)
             lastQueueIds = items.map { it.mediaId }
+            queueContextLabel = contextLabel.ifBlank { inferContext(tracks) }
             pendingRestore = null
             player.setMediaItems(items, startIndex.coerceIn(items.indices), 0L)
             player.prepare()
             player.play()
             persist(player)
+            publish(player)
         }
     }
 
-    /**
-     * Restores a persisted queue when track rows are available after a cold start.
-     * Safe to call repeatedly; no-ops once a live queue exists or nothing was saved.
-     */
     fun restoreSavedQueue(tracksByUri: Map<String, TrackEntity>) {
         val saved = pendingRestore ?: sessionStore.load() ?: return
         if (controller?.mediaItemCount?.let { it > 0 } == true) {
@@ -118,6 +130,7 @@ class PlaybackConnection(context: Context) {
         val startIndex = ordered.indexOfFirst { it.contentUri == startUri }.takeIf { it >= 0 } ?: 0
         withController { player ->
             lastQueueIds = ordered.map { it.contentUri }
+            queueContextLabel = saved.contextLabel.ifBlank { inferContext(ordered) }
             player.shuffleModeEnabled = saved.shuffleEnabled
             player.repeatMode = saved.repeatMode
             player.setMediaItems(ordered.map(TrackEntity::asMediaItem), startIndex, saved.positionMs)
@@ -126,6 +139,13 @@ class PlaybackConnection(context: Context) {
             pendingRestore = null
             persist(player)
             publish(player)
+        }
+    }
+
+    fun playQueueIndex(index: Int) = withController { player ->
+        if (index in 0 until player.mediaItemCount) {
+            player.seekTo(index, 0L)
+            player.play()
         }
     }
 
@@ -154,6 +174,8 @@ class PlaybackConnection(context: Context) {
         mutableState.value = mutableState.value.copy(error = null)
     }
 
+    fun savedMediaIds(): List<String> = sessionStore.load()?.mediaIds.orEmpty()
+
     private fun withController(action: (MediaController) -> Unit) {
         controller?.let(action) ?: controllerFuture.addListener({
             runCatching { controllerFuture.get() }.onSuccess(action)
@@ -163,9 +185,7 @@ class PlaybackConnection(context: Context) {
     private fun restoreSessionIfNeeded(player: Player) {
         if (player.mediaItemCount > 0) {
             pendingRestore = null
-            return
         }
-        // Full restore needs TrackEntity metadata; ViewModel supplies that via restoreSavedQueue.
     }
 
     private fun persist(player: Player) {
@@ -190,12 +210,27 @@ class PlaybackConnection(context: Context) {
                 shuffleEnabled = player.shuffleModeEnabled,
                 repeatMode = player.repeatMode,
                 wasPlaying = player.isPlaying || player.playWhenReady,
+                contextLabel = queueContextLabel,
             )
         )
     }
 
     private fun publish(player: Player) {
         val metadata = player.currentMediaItem?.mediaMetadata
+        val queue = buildList {
+            val count = player.mediaItemCount
+            for (i in 0 until count) {
+                val item = player.getMediaItemAt(i)
+                val meta = item.mediaMetadata
+                add(
+                    QueueItem(
+                        mediaId = item.mediaId,
+                        title = meta.title?.toString().orEmpty().ifBlank { "Track ${i + 1}" },
+                        artist = meta.artist?.toString().orEmpty(),
+                    )
+                )
+            }
+        }
         mutableState.value = PlaybackState(
             connected = true,
             isPlaying = player.isPlaying,
@@ -210,7 +245,23 @@ class PlaybackConnection(context: Context) {
             shuffleEnabled = player.shuffleModeEnabled,
             repeatMode = player.repeatMode,
             error = mutableState.value.error,
+            queueContext = queueContextLabel,
+            queueIndex = player.currentMediaItemIndex.coerceAtLeast(0),
+            queue = queue,
         )
+    }
+
+    private fun inferContext(tracks: List<TrackEntity>): String {
+        if (tracks.isEmpty()) return "Queue"
+        val album = tracks.first().album
+        if (album.isNotBlank() && tracks.all { it.album.equals(album, ignoreCase = true) }) {
+            return "Album · $album"
+        }
+        val artist = tracks.first().artist
+        if (artist.isNotBlank() && tracks.all { it.artist.equals(artist, ignoreCase = true) }) {
+            return "Artist · $artist"
+        }
+        return "Queue · ${tracks.size} tracks"
     }
 }
 

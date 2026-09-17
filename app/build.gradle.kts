@@ -19,8 +19,8 @@ android {
         applicationId = "com.kashef.archive"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.4.3"
+        versionCode = 8
+        versionName = "0.5.0"
 
         buildConfigField("String", "ACOUSTID_CLIENT_KEY", "\"$acoustIdClientKey\"")
 
@@ -78,7 +78,11 @@ dependencies {
 
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
+    implementation("androidx.room:room-paging:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
+
+    implementation("androidx.paging:paging-runtime-ktx:3.3.5")
+    implementation("androidx.paging:paging-compose:3.3.5")
 
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("androidx.media3:media3-exoplayer:1.5.1")

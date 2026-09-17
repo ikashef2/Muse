@@ -9,6 +9,11 @@ import com.kashef.archive.domain.MetadataQualityEvaluator
 import com.kashef.archive.domain.MetadataSnapshot
 import com.kashef.archive.domain.LatinMetadataNormalizer
 import com.kashef.archive.domain.MoodClassifier
+import androidx.paging.Pager
+import androidx.paging.PagingConfig
+import androidx.paging.PagingData
+import com.kashef.archive.domain.GeneratedPlaylist
+import com.kashef.archive.domain.PlaylistMood
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -44,6 +49,68 @@ class MusicRepository(
     private val tagWriter: MetadataTagWriter,
 ) {
     fun observeTracks(): Flow<List<TrackEntity>> = dao.observeAll()
+
+    fun observeLibrarySummary(): Flow<LibrarySummary> = dao.observeLibrarySummary()
+
+    fun observePlayablePaged(): Flow<PagingData<TrackEntity>> = Pager(
+        config = PagingConfig(pageSize = 60, prefetchDistance = 20, enablePlaceholders = false),
+        pagingSourceFactory = { dao.observePlayablePaged() },
+    ).flow
+
+    suspend fun searchPlayable(query: String, limit: Int = 80): List<TrackEntity> =
+        withContext(Dispatchers.IO) {
+            val trimmed = query.trim()
+            if (trimmed.isEmpty()) emptyList() else dao.searchPlayable(trimmed, limit)
+        }
+
+    suspend fun getByUri(uri: String): TrackEntity? = withContext(Dispatchers.IO) { dao.getByUri(uri) }
+
+    fun observeByUri(uri: String): Flow<TrackEntity?> = dao.observeByUri(uri)
+
+    suspend fun getByUris(uris: List<String>): List<TrackEntity> = withContext(Dispatchers.IO) {
+        if (uris.isEmpty()) emptyList() else uris.chunked(400).flatMap { dao.getByUris(it) }
+    }
+
+    suspend fun getAlbumTracks(artist: String, album: String): List<TrackEntity> =
+        withContext(Dispatchers.IO) { dao.getAlbumTracks(artist, album) }
+
+    suspend fun getArtistTracks(artist: String, limit: Int = 200): List<TrackEntity> =
+        withContext(Dispatchers.IO) { dao.getArtistTracks(artist, limit) }
+
+    suspend fun getArtistPage(limit: Int, offset: Int) =
+        withContext(Dispatchers.IO) { dao.getArtistPage(limit, offset) }
+
+    suspend fun getAlbumPage(limit: Int, offset: Int) =
+        withContext(Dispatchers.IO) { dao.getAlbumPage(limit, offset) }
+
+    suspend fun getGenrePage(limit: Int, offset: Int) =
+        withContext(Dispatchers.IO) { dao.getGenrePage(limit, offset) }
+
+    suspend fun getTracksForArtistName(name: String) =
+        withContext(Dispatchers.IO) { dao.getTracksForArtistName(name) }
+
+    suspend fun getTracksForAlbumName(name: String) =
+        withContext(Dispatchers.IO) { dao.getTracksForAlbumName(name) }
+
+    suspend fun getTracksForGenreName(name: String) =
+        withContext(Dispatchers.IO) { dao.getTracksForGenreName(name) }
+
+    suspend fun getImportPage(limit: Int, offset: Int) =
+        withContext(Dispatchers.IO) { dao.getImportPage(limit, offset) }
+
+    suspend fun getUntaggedSample(): TrackEntity? =
+        withContext(Dispatchers.IO) { dao.getUntaggedSample() }
+
+    suspend fun moodMixes(): List<GeneratedPlaylist> = withContext(Dispatchers.IO) {
+        PlaylistMood.entries.map { mood ->
+            val tracks = if (mood == PlaylistMood.DISCOVERY) {
+                dao.getDiscoveryTracks(40)
+            } else {
+                dao.getMoodTracks(mood.name, limit = 40)
+            }
+            GeneratedPlaylist(mood = mood, tracks = tracks)
+        }
+    }
 
     suspend fun scanDevice(): ScanReport = withContext(Dispatchers.IO) {
         val existing = dao.getAllOnce().associateBy(TrackEntity::contentUri)

@@ -659,7 +659,7 @@ private fun LibraryScreen(
     var openingCollection by remember { mutableStateOf(false) }
     var collections by remember { mutableStateOf<List<CollectionCount>>(emptyList()) }
     var collectionsOffset by remember { mutableIntStateOf(0) }
-    var collectionsHasMore by remember { mutableStateOf(true) }
+    var collectionsHasMore by remember { mutableStateOf(false) }
     var collectionsLoading by remember { mutableStateOf(false) }
 
     suspend fun loadCollectionPage(reset: Boolean) {
@@ -684,7 +684,8 @@ private fun LibraryScreen(
         openCollection = null
         collections = emptyList()
         collectionsOffset = 0
-        collectionsHasMore = true
+        collectionsHasMore = false
+        collectionsLoading = false
         loadCollectionPage(reset = true)
     }
 
